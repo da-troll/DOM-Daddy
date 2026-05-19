@@ -72,7 +72,7 @@ MV3 doesn't allow content scripts to be declared as ES modules. To still share `
   - ChatGPT: `[data-message-author-role]`, `[data-message-id]`
   - Claude: `[data-testid="user-message"]`, `.font-claude-message`
   - Gemini: `user-query`, `model-response` (Angular component tags)
-  - AI Studio: `ms-chat-turn` (role from `data-turn-role`); content in `ms-cmark-node`
+  - AI Studio: `ms-chat-turn` → `.user-prompt-container` / `.model-prompt-container` → `.turn-content`; reasoning in `<ms-thought-chunk>`. Uses CDK virtual scrolling, so the extractor scrolls the chat top→bottom and harvests each turn as it mounts.
   - Perplexity: `[class~="group/query"]` for queries, `.prose` for answers
   - LinkedIn: `[componentkey^="entity-collection-item-"]` per company entry; we parse `innerText` line-by-line and ignore hashed CSS classes entirely.
 - **Virtualized / collapsed UIs lose data.** Chat sites unmount off-screen messages; "Show thinking" details and LinkedIn's `…see more` may collapse content. Scroll/expand before extracting.

@@ -1,26 +1,158 @@
 // Google AI Studio (aistudio.google.com) chat extractor.
-// AI Studio uses Angular Material components (ms-* tags). Role is read from
-// data-turn-role / class on ms-chat-turn; rendered model output lives inside
-// ms-cmark-node (its KaTeX/markdown renderer).
+//
+// AI Studio uses Angular Material + CDK virtual scrolling, which means most
+// <ms-chat-turn> elements are NOT in the DOM at any given moment — only the
+// few currently in viewport. To capture a full conversation we scroll through
+// the chat ourselves, harvesting newly-mounted turns into a Map keyed by the
+// stable turn id, then restore the user's scroll position.
+//
+// Structure of a rendered turn:
+//   <ms-chat-turn id="turn-...">
+//     <div class="chat-turn-container ... [user|model] render">
+//       <div class="actions-container">...buttons...</div>
+//       <div class="virtual-scroll-container [user|model]-prompt-container"
+//            data-turn-role="User|Model">
+//         <div style="height: Xpx"></div>           ← spacer when virtualized
+//         <div class="turn-content">                ← body lives here when rendered
+//           <div class="author-label">User|Model <span class="timestamp">…</span></div>
+//           <ms-prompt-chunk class="text-chunk">
+//             <ms-thought-chunk> … reasoning …      ← model only, optional
+//             <ms-text-chunk> … response …          ← (for model) or the prompt (for user)
+//           </ms-prompt-chunk>
+//         </div>
+//       </div>
+//     </div>
+//   </ms-chat-turn>
 
 (async () => {
   const { htmlToMarkdown } = await import(chrome.runtime.getURL('src/lib/markdown.js'));
   const { makeMessage, makeConversation } = await import(chrome.runtime.getURL('src/lib/schema.js'));
 
-  const SELECTORS = {
-    turn: 'ms-chat-turn',
-    // Model-side rendered markdown.
-    modelContent: 'ms-cmark-node, .model-prompt-container, ms-text-chunk, .turn-content, .very-large-text-container',
-    // User-side prompt. AI Studio has used several containers across revisions —
-    // try the specific ones first, then fall back to anything bearing data-turn-role="user".
-    userContent: '.user-prompt-container, .user-prompt, [data-turn-role="user" i] .turn-content, [data-turn-role="user" i], ms-prompt-chunk, ms-text-chunk',
-    // Thinking / "thought" sections collapse by default; capture if expanded.
-    thinking: 'ms-thought-chunk, [data-thought], details.thinking',
-  };
+  const wait = (ms) => new Promise(r => setTimeout(r, ms));
 
-  function extractAIStudio() {
-    const turns = Array.from(document.querySelectorAll(SELECTORS.turn));
-    const messages = turns.map(extractMessage).filter(Boolean);
+  function findScrollViewport() {
+    // Walk up from any turn to the nearest ancestor that actually scrolls.
+    const turn = document.querySelector('ms-chat-turn');
+    if (!turn) return null;
+    let el = turn.parentElement;
+    while (el) {
+      const s = getComputedStyle(el);
+      if ((s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 4) {
+        return el;
+      }
+      el = el.parentElement;
+    }
+    return document.scrollingElement;
+  }
+
+  function extractMessageFromTurn(turn) {
+    const userContainer = turn.querySelector('.user-prompt-container');
+    const modelContainer = turn.querySelector('.model-prompt-container');
+    const container = userContainer || modelContainer;
+    if (!container) return null;
+    const role = userContainer ? 'user' : 'assistant';
+
+    const turnContent = container.querySelector('.turn-content');
+    // Virtualized turns have an empty .turn-content; skip — they'll be
+    // captured on a later harvest pass once scrolled into view.
+    if (!turnContent || !turnContent.firstElementChild) return null;
+
+    const clone = turnContent.cloneNode(true);
+
+    // Strip metadata chrome (author label, action buttons, icon glyphs).
+    clone.querySelectorAll(
+      '.author-label, .actions-container, [role="button"], button, mat-icon, .material-symbols-outlined'
+    ).forEach(el => el.remove());
+
+    let reasoning;
+    if (role === 'assistant') {
+      // Pull thoughts out before removing them, so they go to the reasoning field.
+      const thoughtChunk = clone.querySelector('ms-thought-chunk');
+      if (thoughtChunk) {
+        const body = thoughtChunk.querySelector('.mat-expansion-panel-body') || thoughtChunk;
+        const reasoningText = htmlToMarkdown(body.cloneNode(true));
+        if (reasoningText) reasoning = reasoningText;
+        thoughtChunk.remove();
+      }
+      // Drop the "Google Search Suggestions" grounding block — required in the
+      // live UI but noise in an exported transcript.
+      clone.querySelectorAll(
+        'ms-search-entry-point, [class*="search-entry-point"], [class*="grounded-search-suggestions"]'
+      ).forEach(el => el.remove());
+      clone.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(h => {
+        if (/^\s*google search suggestions\s*$/i.test(h.textContent || '')) {
+          let n = h;
+          while (n) { const next = n.nextSibling; n.remove(); n = next; }
+        }
+      });
+    }
+
+    const html = clone.innerHTML;
+    let content = htmlToMarkdown(clone);
+    if (!content) content = (clone.innerText || clone.textContent || '').trim();
+    if (!content) return null;
+
+    return { role, content, html, reasoning };
+  }
+
+  async function harvestAllTurns() {
+    const viewport = findScrollViewport();
+    // id → { role, content, html, reasoning }
+    const collected = new Map();
+    // first-seen order (== document order, since we scroll top→bottom)
+    const order = [];
+
+    const harvest = () => {
+      for (const turn of document.querySelectorAll('ms-chat-turn')) {
+        const id = turn.id;
+        if (!id || collected.has(id)) continue;
+        const msg = extractMessageFromTurn(turn);
+        if (msg) {
+          collected.set(id, msg);
+          order.push(id);
+        }
+      }
+    };
+
+    const canScroll = viewport && viewport.scrollHeight > viewport.clientHeight + 4;
+    if (!canScroll) {
+      harvest();
+      return order.map(id => collected.get(id));
+    }
+
+    const originalScrollTop = viewport.scrollTop;
+    viewport.scrollTop = 0;
+    await wait(250);
+    harvest();
+
+    let prev = -1;
+    let guard = 0;
+    while (
+      viewport.scrollTop + viewport.clientHeight < viewport.scrollHeight - 2 &&
+      guard++ < 200
+    ) {
+      prev = viewport.scrollTop;
+      viewport.scrollTop = Math.min(
+        viewport.scrollTop + viewport.clientHeight * 0.85,
+        viewport.scrollHeight
+      );
+      await wait(180);
+      harvest();
+      if (viewport.scrollTop === prev) break; // can't advance further
+    }
+    // One final pass at the very bottom in case the last block needed extra paint time.
+    await wait(150);
+    harvest();
+
+    viewport.scrollTop = originalScrollTop;
+    return order.map(id => collected.get(id));
+  }
+
+  async function extractAIStudio() {
+    const raw = await harvestAllTurns();
+    const messages = raw.map(m => makeMessage({
+      role: m.role, content: m.content, html: m.html, reasoning: m.reasoning,
+    }));
 
     return makeConversation({
       source: 'aistudio',
@@ -31,95 +163,12 @@
     });
   }
 
-  function getRole(turn) {
-    // 1. data-turn-role on the turn itself or any descendant (case-insensitive).
-    const roleSelf = (turn.getAttribute && turn.getAttribute('data-turn-role') || '').toLowerCase();
-    const roleChild = turn.querySelector('[data-turn-role]');
-    const role = roleSelf || (roleChild && (roleChild.getAttribute('data-turn-role') || '').toLowerCase()) || '';
-    if (role.includes('user')) return 'user';
-    if (role.includes('model') || role.includes('assistant')) return 'assistant';
-    // 2. Class-based markers (multiple AI Studio revisions).
-    if (turn.querySelector('.user-prompt-container, .user-prompt')) return 'user';
-    if (turn.querySelector('.model-prompt-container, .model-prompt, ms-cmark-node, ms-search-entry-point')) return 'assistant';
-    // 3. Give up: default to user so the turn isn't silently dropped on misclassification.
-    return 'user';
-  }
-
-  function extractMessage(turn) {
-    const role = getRole(turn);
-
-    let reasoning;
-    const thinkingEl = turn.querySelector(SELECTORS.thinking);
-    if (thinkingEl && role === 'assistant') {
-      const tClone = thinkingEl.cloneNode(true);
-      stripJunk(tClone);
-      reasoning = htmlToMarkdown(tClone);
-    }
-
-    // Pick the best content container. For user turns prefer the user-side
-    // selectors (the user prompt isn't always wrapped in ms-cmark-node); for
-    // model turns prefer the rendered-markdown selectors.
-    const primary = role === 'user' ? SELECTORS.userContent : SELECTORS.modelContent;
-    const secondary = role === 'user' ? SELECTORS.modelContent : SELECTORS.userContent;
-    let contentEl = turn.querySelector(primary) || turn.querySelector(secondary) || turn;
-
-    const clone = contentEl.cloneNode(true);
-    stripJunk(clone);
-    clone.querySelectorAll(SELECTORS.thinking).forEach(el => el.remove());
-
-    const html = clone.innerHTML;
-    let content = htmlToMarkdown(clone);
-    // Some user-prompt containers render text in contenteditable / textarea
-    // shells that htmlToMarkdown can't see structure in — fall back to plain
-    // text so the turn isn't silently dropped.
-    if (!content) {
-      const text = (clone.innerText || clone.textContent || '').trim();
-      if (text) content = text;
-    }
-    if (!content) return null;
-
-    return makeMessage({ role, content, html, reasoning });
-  }
-
-  function stripJunk(root) {
-    const junk = [
-      'button',
-      '[role="button"]',
-      'mat-icon',
-      '.actions, .turn-actions, .action-buttons',
-      '[aria-label="Copy"]',
-      '[aria-label="More"]',
-      // Grounding "Google Search Suggestions" block — Google requires it be
-      // shown in the live UI, but it's noise in an exported transcript.
-      'ms-search-entry-point, .search-entry-point',
-      'ms-grounded-search-suggestions, .grounded-search-suggestions',
-      '[class*="search-entry-point"]',
-      '[class*="grounded-search-suggestions"]',
-    ];
-    junk.forEach(sel => root.querySelectorAll(sel).forEach(el => el.remove()));
-
-    // Heading-based fallback: if a heading literally reads "Google Search
-    // Suggestions", drop it and everything after it inside the same parent.
-    root.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(h => {
-      if (/^\s*google search suggestions\s*$/i.test(h.textContent || '')) {
-        let n = h;
-        while (n) {
-          const next = n.nextSibling;
-          n.remove();
-          n = next;
-        }
-      }
-    });
-  }
-
   function getSessionId() {
-    // /prompts/{id} or /app/prompts/{id}
     const m = location.pathname.match(/\/prompts\/([^/?#]+)/);
     return m ? m[1] : '';
   }
 
   function getTitle() {
-    // AI Studio shows the prompt title in the side rail; falls back to document.title.
     const active = document.querySelector(
       '.prompt-title, [data-test-id="prompt-title"], .conversation-title.selected'
     );
@@ -133,12 +182,10 @@
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg?.type === 'EXTRACT') {
-      try {
-        sendResponse({ ok: true, data: extractAIStudio() });
-      } catch (err) {
-        sendResponse({ ok: false, error: String(err?.message || err) });
-      }
-      return true;
+      extractAIStudio()
+        .then(data => sendResponse({ ok: true, data }))
+        .catch(err => sendResponse({ ok: false, error: String(err?.message || err) }));
+      return true; // async response
     }
   });
 })();
