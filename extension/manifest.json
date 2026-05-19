@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DOM Daddy",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Extract structured data from sites that fight scraping. Supports ChatGPT, Claude, Gemini, AI Studio, Perplexity chats and LinkedIn experience pages.",
   "permissions": ["activeTab", "scripting", "storage", "downloads"],
   "host_permissions": [

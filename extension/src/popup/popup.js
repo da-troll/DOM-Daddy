@@ -16,7 +16,7 @@ const SITES = {
   'chat.openai.com':     { source: 'chatgpt',    kind: 'conversation', script: 'src/content/chatgpt.js' },
   'claude.ai':           { source: 'claude',     kind: 'conversation', script: 'src/content/claude.js' },
   'gemini.google.com':   { source: 'gemini',     kind: 'conversation', script: 'src/content/gemini.js' },
-  'aistudio.google.com': { source: 'aistudio',   kind: 'conversation', script: 'src/content/aistudio.js' },
+  'aistudio.google.com': { source: 'aistudio',   kind: 'conversation', script: 'src/content/aistudio.js', refreshOnExport: false },
   'www.perplexity.ai':   { source: 'perplexity', kind: 'conversation', script: 'src/content/perplexity.js' },
   'perplexity.ai':       { source: 'perplexity', kind: 'conversation', script: 'src/content/perplexity.js' },
   'www.linkedin.com':    {
@@ -154,10 +154,15 @@ async function onFormatClick(e) {
   const format = btn.dataset.format;
 
   // Re-extract on each export so users get the live state, not a stale snapshot.
-  try {
-    const fresh = await requestExtraction(cachedTab.id, cachedSite);
-    if (isUseful(fresh, cachedSite.kind)) cachedData = fresh;
-  } catch { /* fall through with cached version */ }
+  // Sites whose extraction is destructive to the page (e.g. AI Studio, where
+  // we must scroll the chat top→bottom to defeat virtualization) opt out via
+  // `refreshOnExport: false` and reuse the snapshot taken when the popup opened.
+  if (cachedSite.refreshOnExport !== false) {
+    try {
+      const fresh = await requestExtraction(cachedTab.id, cachedSite);
+      if (isUseful(fresh, cachedSite.kind)) cachedData = fresh;
+    } catch { /* fall through with cached version */ }
+  }
 
   const result = runExport(cachedData, cachedSite.kind, format);
   if (!result) return;
