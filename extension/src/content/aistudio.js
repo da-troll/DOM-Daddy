@@ -9,10 +9,11 @@
 
   const SELECTORS = {
     turn: 'ms-chat-turn',
-    // Rendered markdown content (model side, but also wraps user text once committed).
-    rendered: 'ms-cmark-node, ms-text-chunk, .turn-content, .very-large-text-container',
-    // User-side raw text containers seen across AI Studio revisions.
-    userText: '.user-prompt-container, [data-turn-role="User"] .turn-content, ms-prompt-chunk',
+    // Model-side rendered markdown.
+    modelContent: 'ms-cmark-node, .model-prompt-container, ms-text-chunk, .turn-content, .very-large-text-container',
+    // User-side prompt. AI Studio has used several containers across revisions —
+    // try the specific ones first, then fall back to anything bearing data-turn-role="user".
+    userContent: '.user-prompt-container, .user-prompt, [data-turn-role="user" i] .turn-content, [data-turn-role="user" i], ms-prompt-chunk, ms-text-chunk',
     // Thinking / "thought" sections collapse by default; capture if expanded.
     thinking: 'ms-thought-chunk, [data-thought], details.thinking',
   };
@@ -31,14 +32,17 @@
   }
 
   function getRole(turn) {
-    const attr = (turn.getAttribute('data-turn-role') || '').toLowerCase();
-    if (attr.includes('user')) return 'user';
-    if (attr.includes('model')) return 'assistant';
-    // Fall back to class / nested markers.
-    if (turn.classList.contains('user') || turn.querySelector('[data-turn-role="User"], .user-prompt-container')) return 'user';
-    if (turn.classList.contains('model') || turn.querySelector('[data-turn-role="Model"], .model-prompt-container')) return 'assistant';
-    // Final fallback: presence of rendered markdown suggests the model.
-    return turn.querySelector('ms-cmark-node') ? 'assistant' : 'user';
+    // 1. data-turn-role on the turn itself or any descendant (case-insensitive).
+    const roleSelf = (turn.getAttribute && turn.getAttribute('data-turn-role') || '').toLowerCase();
+    const roleChild = turn.querySelector('[data-turn-role]');
+    const role = roleSelf || (roleChild && (roleChild.getAttribute('data-turn-role') || '').toLowerCase()) || '';
+    if (role.includes('user')) return 'user';
+    if (role.includes('model') || role.includes('assistant')) return 'assistant';
+    // 2. Class-based markers (multiple AI Studio revisions).
+    if (turn.querySelector('.user-prompt-container, .user-prompt')) return 'user';
+    if (turn.querySelector('.model-prompt-container, .model-prompt, ms-cmark-node, ms-search-entry-point')) return 'assistant';
+    // 3. Give up: default to user so the turn isn't silently dropped on misclassification.
+    return 'user';
   }
 
   function extractMessage(turn) {
@@ -52,17 +56,26 @@
       reasoning = htmlToMarkdown(tClone);
     }
 
-    // Pick the best content container. Prefer rendered markdown when present.
-    let contentEl = turn.querySelector(SELECTORS.rendered);
-    if (!contentEl && role === 'user') contentEl = turn.querySelector(SELECTORS.userText);
-    if (!contentEl) contentEl = turn;
+    // Pick the best content container. For user turns prefer the user-side
+    // selectors (the user prompt isn't always wrapped in ms-cmark-node); for
+    // model turns prefer the rendered-markdown selectors.
+    const primary = role === 'user' ? SELECTORS.userContent : SELECTORS.modelContent;
+    const secondary = role === 'user' ? SELECTORS.modelContent : SELECTORS.userContent;
+    let contentEl = turn.querySelector(primary) || turn.querySelector(secondary) || turn;
 
     const clone = contentEl.cloneNode(true);
     stripJunk(clone);
     clone.querySelectorAll(SELECTORS.thinking).forEach(el => el.remove());
 
     const html = clone.innerHTML;
-    const content = htmlToMarkdown(clone);
+    let content = htmlToMarkdown(clone);
+    // Some user-prompt containers render text in contenteditable / textarea
+    // shells that htmlToMarkdown can't see structure in — fall back to plain
+    // text so the turn isn't silently dropped.
+    if (!content) {
+      const text = (clone.innerText || clone.textContent || '').trim();
+      if (text) content = text;
+    }
     if (!content) return null;
 
     return makeMessage({ role, content, html, reasoning });
