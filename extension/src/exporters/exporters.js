@@ -1,6 +1,8 @@
 // Exporters: take a normalized Conversation object and return { filename, blob }.
 // All formats run entirely in the browser — no server round-trip.
 
+import { prettySource } from '../lib/schema.js';
+
 const ROLE_LABELS = {
   user: 'You',
   assistant: 'Assistant',
@@ -42,7 +44,7 @@ export function exportMarkdown(conv, opts = {}) {
   const { includeReasoning = true } = opts;
   const parts = [];
   parts.push(`# ${conv.title}\n`);
-  parts.push(`*Source: ${conv.source} • Exported: ${formatDate(conv.exportedAt)}*\n`);
+  parts.push(`*Source: ${prettySource(conv.source)} • Exported: ${formatDate(conv.exportedAt)}*\n`);
   if (conv.url) parts.push(`*URL: ${conv.url}*\n`);
 
   for (const m of conv.messages) {
@@ -69,7 +71,7 @@ export function exportText(conv) {
   const lines = [];
   lines.push(conv.title);
   lines.push('='.repeat(conv.title.length));
-  lines.push(`Source: ${conv.source}    Exported: ${formatDate(conv.exportedAt)}`);
+  lines.push(`Source: ${prettySource(conv.source)}    Exported: ${formatDate(conv.exportedAt)}`);
   if (conv.url) lines.push(`URL: ${conv.url}`);
   lines.push('');
 
@@ -160,7 +162,7 @@ export function exportPrintableHTML(conv, opts = {}) {
 <body class="theme--${theme}">
   <header class="doc-header">
     <h1>${escapeHtml(conv.title)}</h1>
-    <p class="doc-meta">${conv.source} • ${formatDate(conv.exportedAt)}</p>
+    <p class="doc-meta">${prettySource(conv.source)} • ${formatDate(conv.exportedAt)}</p>
     ${conv.url ? `<p class="doc-meta"><a href="${escapeHtml(conv.url)}">${escapeHtml(conv.url)}</a></p>` : ''}
   </header>
   <main>${body}</main>
@@ -232,7 +234,7 @@ export function exportProfileMarkdown(profile) {
   const parts = [];
   parts.push(`# ${profile.name || 'Profile'}\n`);
   if (profile.headline) parts.push(`*${profile.headline}*\n`);
-  parts.push(`*Source: ${profile.source} • Exported: ${formatDate(profile.extractedAt)}*\n`);
+  parts.push(`*Source: ${prettySource(profile.source)} • Exported: ${formatDate(profile.extractedAt)}*\n`);
   if (profile.profileUrl) parts.push(`*URL: ${profile.profileUrl}*\n`);
   parts.push('\n## Experience\n');
 

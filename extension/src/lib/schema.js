@@ -34,6 +34,23 @@
 
 export const SCHEMA_VERSION = 2;
 
+// Human-friendly labels for the lowercase `source` keys that travel inside
+// Conversation / Profile objects. The lowercase keys are kept stable in JSON,
+// filenames, and the SITES registry — only the user-visible display strings
+// (popup meta line, Markdown / Text headers) use these labels.
+export const SOURCE_LABELS = {
+  chatgpt: 'ChatGPT',
+  claude: 'Claude',
+  gemini: 'Gemini',
+  aistudio: 'AI Studio',
+  perplexity: 'Perplexity',
+  linkedin: 'LinkedIn',
+};
+
+export function prettySource(source) {
+  return SOURCE_LABELS[source] || source || '';
+}
+
 export function makeConversation({ source, title, url, sessionId, messages }) {
   return {
     schemaVersion: SCHEMA_VERSION,

@@ -7,6 +7,7 @@ import {
   exportProfileJSON,
   exportProfileCSV,
 } from '../exporters/exporters.js';
+import { prettySource } from '../lib/schema.js';
 
 // Site registry: hostname → { source, kind, content script path, optional pageReady check }.
 // pageReady gates extraction so we can show actionable hints (e.g. "open the
@@ -110,13 +111,13 @@ function populateMeta(data, site) {
     els.metaTitle.textContent = data.title;
     els.metaTitle.title = data.title;
     const n = data.messages.length;
-    els.metaSub.textContent = `${n} message${n === 1 ? '' : 's'} · ${data.source}`;
+    els.metaSub.textContent = `${n} message${n === 1 ? '' : 's'} · ${prettySource(data.source)}`;
   } else {
     els.metaTitle.textContent = data.name || 'Profile';
     els.metaTitle.title = data.name || '';
     const companies = data.experiences.length;
     const roles = data.experiences.reduce((s, e) => s + (e.roles?.length || 0), 0);
-    els.metaSub.textContent = `${companies} compan${companies === 1 ? 'y' : 'ies'} · ${roles} role${roles === 1 ? '' : 's'} · ${data.source}`;
+    els.metaSub.textContent = `${companies} compan${companies === 1 ? 'y' : 'ies'} · ${roles} role${roles === 1 ? '' : 's'} · ${prettySource(data.source)}`;
   }
   els.metaTitle.hidden = false;
   els.metaSub.hidden = false;
