@@ -128,7 +128,12 @@ async function init() {
 
 async function runExtractionFlow(tab, site) {
   try {
-    const data = await requestExtraction(tab.id, site);
+    // For profile pages (LinkedIn) the experience list hydrates AFTER the
+    // page-load event, so a one-shot extraction can land on an empty DOM.
+    // Poll with short retries until the entries appear or we time out.
+    const data = site.kind === 'profile'
+      ? await extractWithRetry(tab.id, site, { maxAttempts: 12, intervalMs: 500 })
+      : await requestExtraction(tab.id, site);
     if (!isUseful(data, site.kind)) {
       setStatus('Nothing to export on this page', 'error');
       return;
@@ -303,81 +308,17 @@ function showHint(hint, actionUrl, site) {
   if (els.hintAction) {
     if (actionUrl) {
       els.hintAction.hidden = false;
-      els.hintAction.onclick = () => navigateAndAwaitReady(actionUrl, site);
+      // Chrome action popups close when the active tab navigates — a hard
+      // platform constraint, no workaround. Background-tab + extract-then-
+      // close fails because LinkedIn defers React hydration on inactive tabs.
+      // So: just navigate. Popup closes; when the user re-opens it on the
+      // loaded experience page, init() picks up automatically and (with the
+      // hydration-retry below) reliably finds the experience entries.
+      els.hintAction.onclick = () => chrome.tabs.update(cachedTab.id, { url: actionUrl });
     } else {
       els.hintAction.hidden = true;
     }
   }
-}
-
-// Open the target URL in a HIDDEN background tab, wait for it to load, extract
-// from it, then close the background tab. The user's current tab stays focused,
-// the popup never loses focus, and the user ends up with the export data
-// without ever leaving the page they were on.
-//
-// (Earlier attempt: navigate the current tab via chrome.tabs.update() and add
-// a chrome.tabs.onUpdated listener to re-render the popup. That doesn't work —
-// Chrome action popups consistently close when the active tab navigates.)
-async function navigateAndAwaitReady(actionUrl, site) {
-  if (!cachedTab?.id) return;
-  els.hintAction.disabled = true;
-  setStatus('Loading…');
-
-  let bgTab;
-  try {
-    bgTab = await chrome.tabs.create({ url: actionUrl, active: false });
-  } catch (err) {
-    setStatus("Couldn't open page", 'error');
-    els.hintAction.disabled = false;
-    console.error(err);
-    return;
-  }
-
-  const closeBg = () => chrome.tabs.remove(bgTab.id).catch(() => {});
-
-  let loadedTab;
-  try {
-    loadedTab = await awaitTabReady(bgTab.id, site);
-  } catch (err) {
-    setStatus('Page load timed out', 'error');
-    els.hintAction.disabled = false;
-    await closeBg();
-    return;
-  }
-
-  setStatus('Reading…');
-  // LinkedIn's experience list is React-hydrated AFTER status === 'complete',
-  // so a single extraction call often returns an empty experiences array.
-  // Poll: up to 12 attempts × 500ms = 6s total, give up if nothing arrives.
-  let data;
-  try {
-    data = await extractWithRetry(loadedTab.id, site, { maxAttempts: 12, intervalMs: 500 });
-  } catch (err) {
-    setStatus("Couldn't read experience page", 'error');
-    els.hintAction.disabled = false;
-    await closeBg();
-    console.error(err);
-    return;
-  }
-  await closeBg();
-
-  if (!isUseful(data, site.kind)) {
-    setStatus('Page loaded but no experiences appeared', 'error');
-    els.hintAction.disabled = false;
-    return;
-  }
-
-  cachedData = data;
-  // cachedTab stays as the user's original tab — downloads still get attributed
-  // to where they actually are. The background tab is gone by now anyway.
-  els.hint.hidden = true;
-  els.hintAction.hidden = true;
-  els.hintAction.disabled = false;
-  setStatus(`Detected: ${prettySource(site.source)}`, 'detect');
-  populateMeta(data, site);
-  configureUI(site);
-  revealFormatButtons();
-  els.defaultFmt?.focus();
 }
 
 async function extractWithRetry(tabId, site, { maxAttempts = 12, intervalMs = 500 } = {}) {
@@ -395,24 +336,6 @@ async function extractWithRetry(tabId, site, { maxAttempts = 12, intervalMs = 50
     if (i < maxAttempts - 1) await new Promise(r => setTimeout(r, intervalMs));
   }
   return last;
-}
-
-function awaitTabReady(tabId, site) {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      chrome.tabs.onUpdated.removeListener(onUpdated);
-      reject(new Error('timeout'));
-    }, 30_000);
-    const onUpdated = (changedId, changeInfo, tab) => {
-      if (changedId !== tabId) return;
-      if (changeInfo.status !== 'complete') return;
-      if (!tab?.url || !site.pageReady?.(tab.url)) return;
-      clearTimeout(timeout);
-      chrome.tabs.onUpdated.removeListener(onUpdated);
-      resolve(tab);
-    };
-    chrome.tabs.onUpdated.addListener(onUpdated);
-  });
 }
 
 // ---------- Format-click + downloads ----------
