@@ -346,9 +346,12 @@ async function navigateAndAwaitReady(actionUrl, site) {
   }
 
   setStatus('Reading…');
+  // LinkedIn's experience list is React-hydrated AFTER status === 'complete',
+  // so a single extraction call often returns an empty experiences array.
+  // Poll: up to 12 attempts × 500ms = 6s total, give up if nothing arrives.
   let data;
   try {
-    data = await requestExtraction(loadedTab.id, site);
+    data = await extractWithRetry(loadedTab.id, site, { maxAttempts: 12, intervalMs: 500 });
   } catch (err) {
     setStatus("Couldn't read experience page", 'error');
     els.hintAction.disabled = false;
@@ -359,7 +362,7 @@ async function navigateAndAwaitReady(actionUrl, site) {
   await closeBg();
 
   if (!isUseful(data, site.kind)) {
-    setStatus('Nothing to export on this page', 'error');
+    setStatus('Page loaded but no experiences appeared', 'error');
     els.hintAction.disabled = false;
     return;
   }
@@ -375,6 +378,23 @@ async function navigateAndAwaitReady(actionUrl, site) {
   configureUI(site);
   revealFormatButtons();
   els.defaultFmt?.focus();
+}
+
+async function extractWithRetry(tabId, site, { maxAttempts = 12, intervalMs = 500 } = {}) {
+  let last = null;
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const data = await requestExtraction(tabId, site);
+      if (isUseful(data, site.kind)) return data;
+      last = data;
+    } catch (err) {
+      // Content script may not yet be ready; requestExtraction's fallback
+      // re-injects, but the SPA itself may still be hydrating. Keep retrying.
+      console.debug('[DOM Daddy] extract attempt', i + 1, 'failed:', err);
+    }
+    if (i < maxAttempts - 1) await new Promise(r => setTimeout(r, intervalMs));
+  }
+  return last;
 }
 
 function awaitTabReady(tabId, site) {
