@@ -117,10 +117,16 @@ async function init() {
     hideExportUI();
     const actionUrl = site.pageHintAction?.(tab.url);
     const hint = typeof site.pageHint === 'function' ? site.pageHint(actionUrl) : site.pageHint;
-    showHint(hint, actionUrl);
+    showHint(hint, actionUrl, site);
+    els.formats.addEventListener('click', onFormatClick);
     return;
   }
 
+  await runExtractionFlow(tab, site);
+  els.formats.addEventListener('click', onFormatClick);
+}
+
+async function runExtractionFlow(tab, site) {
   try {
     const data = await requestExtraction(tab.id, site);
     if (!isUseful(data, site.kind)) {
@@ -136,8 +142,6 @@ async function init() {
     setStatus('Could not read this page', 'error');
     console.error(err);
   }
-
-  els.formats.addEventListener('click', onFormatClick);
 }
 
 // ---------- RawMode ----------
@@ -274,7 +278,7 @@ function hideExportUI() {
   if (els.fmtCsv)     els.fmtCsv.hidden = true;
 }
 
-function showHint(hint, actionUrl) {
+function showHint(hint, actionUrl, site) {
   if (!els.hint) return;
   // Clear and rebuild — never set innerHTML from a string.
   els.hint.replaceChildren();
@@ -282,10 +286,10 @@ function showHint(hint, actionUrl) {
     els.hint.hidden = true;
   } else if (Array.isArray(hint)) {
     for (const tok of hint) {
-      const node = tok.italic ? document.createElement('em') : document.createTextNode('');
       if (tok.italic) {
-        node.textContent = tok.text || '';
-        els.hint.appendChild(node);
+        const em = document.createElement('em');
+        em.textContent = tok.text || '';
+        els.hint.appendChild(em);
       } else {
         els.hint.appendChild(document.createTextNode(tok.text || ''));
       }
@@ -299,10 +303,51 @@ function showHint(hint, actionUrl) {
   if (els.hintAction) {
     if (actionUrl) {
       els.hintAction.hidden = false;
-      els.hintAction.onclick = () => chrome.tabs.update(cachedTab.id, { url: actionUrl });
+      els.hintAction.onclick = () => navigateAndAwaitReady(actionUrl, site);
     } else {
       els.hintAction.hidden = true;
     }
+  }
+}
+
+// Navigate the current tab to actionUrl and, IF the popup survives the
+// navigation (Chrome action popups sometimes close on tab focus changes),
+// transition into the normal extraction flow once the target page finishes
+// loading. If the popup is killed before navigation completes, the listener
+// dies with it and behavior degrades to today (user re-clicks the icon).
+async function navigateAndAwaitReady(actionUrl, site) {
+  if (!cachedTab?.id) return;
+  els.hintAction.disabled = true;
+  setStatus('Navigating…');
+
+  let resolved = false;
+  const onUpdated = (tabId, changeInfo, tab) => {
+    if (tabId !== cachedTab.id || resolved) return;
+    if (changeInfo.status !== 'complete') return;
+    if (!tab?.url || !site.pageReady?.(tab.url)) return;
+    resolved = true;
+    chrome.tabs.onUpdated.removeListener(onUpdated);
+    cachedTab = tab;
+    els.hint.hidden = true;
+    els.hintAction.hidden = true;
+    els.hintAction.disabled = false;
+    setStatus(`Detected: ${prettySource(site.source)}`, 'detect');
+    runExtractionFlow(tab, site);
+  };
+  chrome.tabs.onUpdated.addListener(onUpdated);
+
+  // Safety net — if the navigation never completes, drop the listener.
+  setTimeout(() => {
+    if (!resolved) chrome.tabs.onUpdated.removeListener(onUpdated);
+  }, 30_000);
+
+  try {
+    await chrome.tabs.update(cachedTab.id, { url: actionUrl });
+  } catch (err) {
+    chrome.tabs.onUpdated.removeListener(onUpdated);
+    setStatus('Navigation failed', 'error');
+    els.hintAction.disabled = false;
+    console.error(err);
   }
 }
 
