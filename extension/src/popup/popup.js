@@ -34,13 +34,20 @@ const SITES = {
     kind: 'profile',
     script: 'src/content/linkedin.js',
     pageReady: (url) => /^\/in\/[^/]+\/details\/experience\/?$/.test(new URL(url).pathname),
-    // Hint is a token array so we can render italics without ever passing
-    // user-influenced strings through innerHTML.
-    pageHint: [
-      { text: 'DOM Daddy only grabs the ' },
-      { text: 'Experience details', italic: true },
-      { text: ' page. Click below to navigate there.' },
-    ],
+    // pageHint is a function of `actionUrl` — when there's no slug in the URL
+    // (e.g. /feed/) we can't build a "take me there" link, so the copy must
+    // tell the user to navigate manually first.
+    pageHint: (actionUrl) => actionUrl
+      ? [
+          { text: 'DOM Daddy only grabs the ' },
+          { text: 'Experience details', italic: true },
+          { text: ' page. Click below to navigate there.' },
+        ]
+      : [
+          { text: 'DOM Daddy only grabs the ' },
+          { text: 'Experience details', italic: true },
+          { text: " page. Navigate to a person's profile page and re-open DOM Daddy to initiate an export." },
+        ],
     pageHintAction: (url) => {
       const m = new URL(url).pathname.match(/^\/in\/([^/]+)/);
       return m ? `https://www.linkedin.com/in/${m[1]}/details/experience/` : null;
@@ -105,9 +112,12 @@ async function init() {
 
   if (site.pageReady && !site.pageReady(tab.url)) {
     // Wrong-page branch: force-hide formats + options so they can't bleed
-    // through under the hint, and show the hint with action.
+    // through under the hint, and show the hint with action. pageHint can be
+    // a function that adapts copy based on whether we have an actionable URL.
     hideExportUI();
-    showHint(site.pageHint, site.pageHintAction?.(tab.url));
+    const actionUrl = site.pageHintAction?.(tab.url);
+    const hint = typeof site.pageHint === 'function' ? site.pageHint(actionUrl) : site.pageHint;
+    showHint(hint, actionUrl);
     return;
   }
 
