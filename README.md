@@ -89,7 +89,8 @@ MV3 doesn't allow content scripts to be declared as ES modules. To still share `
   - AI Studio: `ms-chat-turn` → `.user-prompt-container` / `.model-prompt-container` → `.turn-content`; reasoning in `<ms-thought-chunk>`. Uses CDK virtual scrolling, so the extractor scrolls the chat top→bottom and harvests each turn as it mounts.
   - Perplexity: `[class~="group/query"]` for queries, `.prose` for answers
   - LinkedIn: `[componentkey^="entity-collection-item-"]` per company entry; we parse `innerText` line-by-line and ignore hashed CSS classes entirely.
-- **Virtualized / collapsed UIs lose data.** Chat sites unmount off-screen messages; "Show thinking" details and LinkedIn's `…see more` may collapse content. Scroll/expand before extracting.
+- **Virtualized / collapsed UIs lose data.** Chat sites unmount off-screen messages; "Show thinking" details and LinkedIn's `…see more` may collapse content. Scroll/expand before extracting. For AI Studio specifically, the extractor scrolls top→bottom automatically on popup open.
+- **LinkedIn React hydration race.** The `entity-collection-item-*` entries on the experience page render after the load event fires. The popup polls for up to ~6 seconds while LinkedIn hydrates, so a fast re-open immediately after navigation will wait briefly rather than fail.
 - **LinkedIn `+N skills`.** The "+N skills" overflow on roles can't be pulled without clicking the chip — we capture the visible skills and store the hidden count as `hiddenSkillCount`.
 - **Canvas / Artifacts** (ChatGPT side panel, Claude artifacts) aren't currently captured.
 - **No real chat timestamps.** None of the chat hosts expose creation date or per-message timestamps in the DOM, so the date in the filename is the export date.
