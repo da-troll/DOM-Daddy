@@ -13,9 +13,20 @@
 A Manifest V3 Chrome extension that extracts structured data from sites that fight scraping. Currently:
 
 - **ChatGPT, Claude, Gemini, AI Studio, Perplexity** chats → Markdown / Text / JSON / CSV
-- **LinkedIn** experience pages (`/in/{you}/details/experience/`) → Markdown / JSON / CSV (one row per role)
+- **LinkedIn** experience pages (`/in/{you}/details/experience/`) → Markdown / Text / JSON / CSV (one row per role)
+- **Anything else** → **RawMode**, a two-step generic extractor for any site not in the list above
 
-Pure client-side. No server, no build step, no analytics, no dependencies.
+Pure client-side. No server, no build step at runtime, no analytics. One vendored dependency: [Defuddle](https://github.com/kepano/defuddle) (MIT, ~290 KB ESM bundle) powers RawMode's article parsing.
+
+## RawMode
+
+On any unsupported site the popup shows `Unsupported site – RawMode Active` and a single `Analyze Page` button. Clicking it injects a generic content script that runs a **tiered extraction pipeline**:
+
+1. **Defuddle** — full-fidelity article parsing on a re-parsed DOM clone (Defuddle is destructive). Returns title, byline, siteName, language, publishedTime, excerpt, word count, plus cleaned HTML. Then `lib/markdown.js` converts the HTML to Markdown.
+2. **Semantic walker** — first `<main>` / `<article>` / `[role="main"]` element, with nav/aside/header/footer/script stripped, run through `htmlToMarkdown`. Used when Defuddle returns no useful content.
+3. **Plain text** — `document.body.textContent` as a last-ditch fallback. Always succeeds on a non-empty page.
+
+The chosen tier is recorded in the export's `extractorTier` field so you can spot when a page fell back. The four format buttons (Markdown / Text / JSON / CSV) replace the Analyze button once analysis completes, and the result is cached in `chrome.storage.session` keyed by tab + URL — re-opening the popup on the same page skips Analyze entirely. Navigating away or restarting the browser clears it.
 
 ## Install (unpacked)
 
@@ -38,13 +49,16 @@ extension/
     background/            Thin service worker (lifecycle hooks only)
     content/               One extractor per supported host
       chatgpt.js  claude.js  gemini.js  aistudio.js  perplexity.js
+      rawmode.js           generic extractor for unsupported sites (on-demand)
       linkedin.js          /in/{slug}/details/experience/
     lib/
-      schema.js            Conversation + Profile types (kind discriminator)
+      schema.js            Conversation / Profile / Article types (kind discriminator)
       markdown.js          HTML -> Markdown converter (no deps)
+      defuddle.js          vendored Defuddle bundle, powers RawMode
     exporters/
       exporters.js         export{Markdown,Text,JSON,CSV} for conversations
-                           export{ProfileMarkdown,ProfileJSON,ProfileCSV} for profiles
+                           export{ProfileMarkdown,ProfileText,ProfileJSON,ProfileCSV} for profiles
+                           export{ArticleMarkdown,ArticleText,ArticleJSON,ArticleCSV} for RawMode
     popup/
       popup.html / .css / .js   User-facing UI; branches on result kind
   icons/

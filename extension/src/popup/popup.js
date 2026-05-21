@@ -4,14 +4,23 @@ import {
   exportJSON,
   exportCSV,
   exportProfileMarkdown,
+  exportProfileText,
   exportProfileJSON,
   exportProfileCSV,
+  exportArticleMarkdown,
+  exportArticleText,
+  exportArticleJSON,
+  exportArticleCSV,
 } from '../exporters/exporters.js';
 import { prettySource } from '../lib/schema.js';
 
 // Site registry: hostname → { source, kind, content script path, optional pageReady check }.
 // pageReady gates extraction so we can show actionable hints (e.g. "open the
 // experience details page first" for LinkedIn) instead of a generic error.
+//
+// Hosts NOT in this registry fall through to RawMode (generic extraction via
+// vendored Defuddle + tiered fallbacks). RawMode treats the page as
+// `kind: 'article'` and reuses the four format buttons.
 const SITES = {
   'chatgpt.com':         { source: 'chatgpt',    kind: 'conversation', script: 'src/content/chatgpt.js' },
   'chat.openai.com':     { source: 'chatgpt',    kind: 'conversation', script: 'src/content/chatgpt.js' },
@@ -25,7 +34,13 @@ const SITES = {
     kind: 'profile',
     script: 'src/content/linkedin.js',
     pageReady: (url) => /^\/in\/[^/]+\/details\/experience\/?$/.test(new URL(url).pathname),
-    pageHint: 'Open the Experience details page (Profile → Show all experience).',
+    // Hint is a token array so we can render italics without ever passing
+    // user-influenced strings through innerHTML.
+    pageHint: [
+      { text: 'DOM Daddy only grabs the ' },
+      { text: 'Experience details', italic: true },
+      { text: ' page. Click below to navigate there.' },
+    ],
     pageHintAction: (url) => {
       const m = new URL(url).pathname.match(/^\/in\/([^/]+)/);
       return m ? `https://www.linkedin.com/in/${m[1]}/details/experience/` : null;
@@ -33,17 +48,28 @@ const SITES = {
   },
 };
 
+// Synthetic site entry for RawMode — used as `cachedSite` after Analyze.
+const RAWMODE_SITE = {
+  source: 'rawmode',
+  kind: 'article',
+  script: 'src/content/rawmode.js',
+  refreshOnExport: false,
+};
+
 const els = {
-  status: document.getElementById('status'),
-  metaTitle: document.getElementById('meta-title'),
-  metaSub: document.getElementById('meta-sub'),
-  options: document.getElementById('options'),
-  formats: document.getElementById('formats'),
+  status:       document.getElementById('status'),
+  metaTitle:    document.getElementById('meta-title'),
+  metaSub:      document.getElementById('meta-sub'),
+  options:      document.getElementById('options'),
+  formats:      document.getElementById('formats'),
   optReasoning: document.getElementById('opt-reasoning'),
-  defaultFmt: document.getElementById('default-fmt'),
-  fmtTxt: document.querySelector('button.fmt[data-format="txt"]'),
-  hint: document.getElementById('hint'),
-  hintAction: document.getElementById('hint-action'),
+  defaultFmt:   document.getElementById('default-fmt'),
+  analyzeBtn:   document.getElementById('analyze-btn'),
+  fmtTxt:       document.querySelector('button.fmt[data-format="txt"]'),
+  fmtJson:      document.querySelector('button.fmt[data-format="json"]'),
+  fmtCsv:       document.querySelector('button.fmt[data-format="csv"]'),
+  hint:         document.getElementById('hint'),
+  hintAction:   document.getElementById('hint-action'),
 };
 
 let cachedData = null;
@@ -65,44 +91,128 @@ async function init() {
   catch { host = ''; }
 
   const site = SITES[host];
+
   if (!site) {
-    setStatus('Open a supported site (ChatGPT, Claude, Gemini, AI Studio, Perplexity, LinkedIn).', 'ok');
+    // Unsupported host → RawMode.
+    await initRawMode(tab);
+    els.formats.addEventListener('click', onFormatClick);
+    els.analyzeBtn?.addEventListener('click', onAnalyzeClick);
     return;
   }
+
   cachedSite = site;
+  setStatus(`Detected: ${prettySource(site.source)}`, 'detect');
 
   if (site.pageReady && !site.pageReady(tab.url)) {
-    setStatus('Wrong page', 'error');
+    // Wrong-page branch: force-hide formats + options so they can't bleed
+    // through under the hint, and show the hint with action.
+    hideExportUI();
     showHint(site.pageHint, site.pageHintAction?.(tab.url));
     return;
   }
 
-  setStatus(site.kind === 'profile' ? 'Reading profile…' : 'Reading conversation…');
-
   try {
     const data = await requestExtraction(tab.id, site);
     if (!isUseful(data, site.kind)) {
-      setStatus('Nothing to export on this page.', 'error');
+      setStatus('Nothing to export on this page', 'error');
       return;
     }
     cachedData = data;
     populateMeta(data, site);
     configureUI(site);
-    els.formats.hidden = false;
-    setStatus('Ready', 'ok');
+    revealFormatButtons();
     els.defaultFmt?.focus();
   } catch (err) {
-    setStatus('Could not read this page. Reload and try again.', 'error');
+    setStatus('Could not read this page', 'error');
     console.error(err);
   }
 
   els.formats.addEventListener('click', onFormatClick);
 }
 
+// ---------- RawMode ----------
+
+async function initRawMode(tab) {
+  setStatus('Unsupported site – RawMode Active', 'raw');
+  cachedSite = RAWMODE_SITE;
+
+  // Try to restore a cached analysis for this exact tab+url so re-opening the
+  // popup on the same page skips the Analyze step.
+  const cached = await sessionGet(rawmodeKey(tab));
+  if (cached && isUseful(cached, 'article')) {
+    cachedData = cached;
+    populateMeta(cached, RAWMODE_SITE);
+    configureUI(RAWMODE_SITE);
+    revealFormatButtons();
+    return;
+  }
+
+  // No cache → show the single Analyze Page button spanning both grid columns.
+  els.formats.hidden = false;
+  els.analyzeBtn.hidden = false;
+}
+
+async function onAnalyzeClick() {
+  if (!cachedTab?.id) return;
+
+  els.analyzeBtn.disabled = true;
+  setStatus('Analyzing…');
+
+  try {
+    const data = await injectAndExtract(cachedTab.id, RAWMODE_SITE.script);
+    if (!isUseful(data, 'article')) {
+      setStatus('Nothing to extract on this page', 'error');
+      els.analyzeBtn.disabled = false;
+      return;
+    }
+    cachedData = data;
+    await sessionSet(rawmodeKey(cachedTab), data);
+    populateMeta(data, RAWMODE_SITE);
+    configureUI(RAWMODE_SITE);
+    els.analyzeBtn.hidden = true;
+    revealFormatButtons();
+    setStatus(`Detected: ${data.hostname || 'page'} · RawMode`, 'detect');
+    els.defaultFmt?.focus();
+  } catch (err) {
+    const msg = String(err?.message || err);
+    if (/cannot access|chrome:|chrome-extension:|edge:/i.test(msg)) {
+      setStatus("Can't analyze this page", 'error');
+    } else {
+      setStatus('Analysis failed', 'error');
+    }
+    els.analyzeBtn.disabled = false;
+    console.error(err);
+  }
+}
+
+function rawmodeKey(tab) {
+  return `rawmode:${tab.id}:${tab.url}`;
+}
+
+async function injectAndExtract(tabId, file) {
+  await chrome.scripting.executeScript({ target: { tabId }, files: [file] });
+  return await sendExtractMessage(tabId);
+}
+
+async function sessionGet(key) {
+  try {
+    const out = await chrome.storage.session.get(key);
+    return out?.[key] || null;
+  } catch { return null; }
+}
+
+async function sessionSet(key, value) {
+  try { await chrome.storage.session.set({ [key]: value }); }
+  catch { /* non-fatal */ }
+}
+
+// ---------- UI helpers ----------
+
 function isUseful(data, kind) {
   if (!data) return false;
   if (kind === 'conversation') return !!data.messages?.length;
-  if (kind === 'profile') return !!data.experiences?.length;
+  if (kind === 'profile')      return !!data.experiences?.length;
+  if (kind === 'article')      return !!data.content;
   return false;
 }
 
@@ -112,32 +222,70 @@ function populateMeta(data, site) {
     els.metaTitle.title = data.title;
     const n = data.messages.length;
     els.metaSub.textContent = `${n} message${n === 1 ? '' : 's'} · ${prettySource(data.source)}`;
-  } else {
+  } else if (site.kind === 'profile') {
     els.metaTitle.textContent = data.name || 'Profile';
     els.metaTitle.title = data.name || '';
     const companies = data.experiences.length;
     const roles = data.experiences.reduce((s, e) => s + (e.roles?.length || 0), 0);
     els.metaSub.textContent = `${companies} compan${companies === 1 ? 'y' : 'ies'} · ${roles} role${roles === 1 ? '' : 's'} · ${prettySource(data.source)}`;
+  } else if (site.kind === 'article') {
+    els.metaTitle.textContent = data.title || 'Untitled';
+    els.metaTitle.title = data.title || '';
+    const wc = data.wordCount || 0;
+    const tierLabel = data.extractorTier ? ` (${data.extractorTier})` : '';
+    els.metaSub.textContent = `${wc.toLocaleString()} words · ${data.hostname || ''} · ${prettySource(data.source)}${tierLabel}`;
   }
   els.metaTitle.hidden = false;
   els.metaSub.hidden = false;
 }
 
 function configureUI(site) {
-  if (site.kind === 'profile') {
-    // No "reasoning" toggle and no Text format for profiles.
-    els.options.hidden = true;
-    if (els.fmtTxt) els.fmtTxt.hidden = true;
-  } else {
-    els.options.hidden = false;
-    if (els.fmtTxt) els.fmtTxt.hidden = false;
-  }
+  // Reasoning checkbox: only for conversations (chats with thinking blocks).
+  // Hidden for both profile (LinkedIn) and article (RawMode).
+  els.options.hidden = site.kind !== 'conversation';
 }
 
-function showHint(text, actionUrl) {
+function revealFormatButtons() {
+  els.formats.hidden = false;
+  if (els.analyzeBtn) els.analyzeBtn.hidden = true;
+  if (els.defaultFmt) els.defaultFmt.hidden = false;
+  if (els.fmtTxt)     els.fmtTxt.hidden = false;
+  if (els.fmtJson)    els.fmtJson.hidden = false;
+  if (els.fmtCsv)     els.fmtCsv.hidden = false;
+}
+
+function hideExportUI() {
+  els.formats.hidden = true;
+  els.options.hidden = true;
+  if (els.analyzeBtn) els.analyzeBtn.hidden = true;
+  if (els.defaultFmt) els.defaultFmt.hidden = true;
+  if (els.fmtTxt)     els.fmtTxt.hidden = true;
+  if (els.fmtJson)    els.fmtJson.hidden = true;
+  if (els.fmtCsv)     els.fmtCsv.hidden = true;
+}
+
+function showHint(hint, actionUrl) {
   if (!els.hint) return;
-  els.hint.textContent = text || '';
-  els.hint.hidden = !text;
+  // Clear and rebuild — never set innerHTML from a string.
+  els.hint.replaceChildren();
+  if (!hint) {
+    els.hint.hidden = true;
+  } else if (Array.isArray(hint)) {
+    for (const tok of hint) {
+      const node = tok.italic ? document.createElement('em') : document.createTextNode('');
+      if (tok.italic) {
+        node.textContent = tok.text || '';
+        els.hint.appendChild(node);
+      } else {
+        els.hint.appendChild(document.createTextNode(tok.text || ''));
+      }
+    }
+    els.hint.hidden = false;
+  } else {
+    els.hint.textContent = String(hint);
+    els.hint.hidden = false;
+  }
+
   if (els.hintAction) {
     if (actionUrl) {
       els.hintAction.hidden = false;
@@ -148,16 +296,15 @@ function showHint(text, actionUrl) {
   }
 }
 
+// ---------- Format-click + downloads ----------
+
 async function onFormatClick(e) {
   const btn = e.target.closest('button.fmt');
   if (!btn || !cachedData || !cachedSite) return;
+  if (btn.id === 'analyze-btn') return; // analyze has its own handler
 
   const format = btn.dataset.format;
 
-  // Re-extract on each export so users get the live state, not a stale snapshot.
-  // Sites whose extraction is destructive to the page (e.g. AI Studio, where
-  // we must scroll the chat top→bottom to defeat virtualization) opt out via
-  // `refreshOnExport: false` and reuse the snapshot taken when the popup opened.
   if (cachedSite.refreshOnExport !== false) {
     try {
       const fresh = await requestExtraction(cachedTab.id, cachedSite);
@@ -190,8 +337,16 @@ function runExport(data, kind, format) {
   } else if (kind === 'profile') {
     switch (format) {
       case 'md':   return exportProfileMarkdown(data);
+      case 'txt':  return exportProfileText(data);
       case 'json': return exportProfileJSON(data);
       case 'csv':  return exportProfileCSV(data);
+    }
+  } else if (kind === 'article') {
+    switch (format) {
+      case 'md':   return exportArticleMarkdown(data);
+      case 'txt':  return exportArticleText(data);
+      case 'json': return exportArticleJSON(data);
+      case 'csv':  return exportArticleCSV(data);
     }
   }
   return null;
@@ -268,4 +423,5 @@ async function getActiveTab() {
 function setStatus(text, kind = '') {
   els.status.textContent = text;
   els.status.className = 'status' + (kind ? ` status--${kind}` : '');
+  els.status.title = text; // tooltip in case it ellipsis-truncates
 }

@@ -320,15 +320,148 @@ export function exportProfileCSV(profile) {
   };
 }
 
+export function exportProfileText(profile) {
+  const lines = [];
+  const name = profile.name || 'Profile';
+  lines.push(name);
+  lines.push('='.repeat(name.length));
+  if (profile.headline) lines.push(profile.headline);
+  lines.push(`Source: ${prettySource(profile.source)}    Exported: ${formatDate(profile.extractedAt)}`);
+  if (profile.profileUrl) lines.push(`URL: ${profile.profileUrl}`);
+  lines.push('');
+  lines.push('Experience');
+  lines.push('----------');
+
+  for (const exp of profile.experiences) {
+    lines.push('');
+    lines.push(`[${exp.company}]`);
+    const companyMeta = [exp.employmentType, exp.totalDurationText].filter(Boolean).join(' · ');
+    if (companyMeta) lines.push(companyMeta);
+    const companyLoc = [exp.location, exp.locationType].filter(Boolean).join(' · ');
+    if (companyLoc) lines.push(companyLoc);
+
+    for (const role of exp.roles) {
+      lines.push('');
+      const dates = [
+        [role.startDateText, role.endDateText].filter(Boolean).join(' – '),
+        role.durationText,
+      ].filter(Boolean).join(' · ');
+      lines.push(`  - ${role.title}${dates ? ` (${dates})` : ''}`);
+      const roleLoc = [role.location, role.locationType].filter(Boolean).join(' · ');
+      if (roleLoc) lines.push(`    ${roleLoc}`);
+      if (role.description) lines.push(`    ${stripMarkdown(role.description).replace(/\n/g, '\n    ')}`);
+      if (role.skills?.length) {
+        const more = role.hiddenSkillCount ? ` (+${role.hiddenSkillCount} more)` : '';
+        lines.push(`    Skills: ${role.skills.join(', ')}${more}`);
+      }
+    }
+  }
+
+  return {
+    filename: filename(profile, 'txt'),
+    blob: new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' }),
+  };
+}
+
+// =====================================================================
+// Article exporters (kind === 'article') — RawMode for unsupported sites.
+// =====================================================================
+
+export function exportArticleMarkdown(article) {
+  const parts = [];
+  parts.push(`# ${article.title}\n`);
+  const meta = [];
+  if (article.byline) meta.push(`*${article.byline}*`);
+  if (article.siteName) meta.push(`*${article.siteName}*`);
+  if (article.publishedTime) meta.push(`*${article.publishedTime}*`);
+  if (meta.length) parts.push(meta.join(' · ') + '\n');
+  parts.push(`*Source: ${prettySource(article.source)} (${article.extractorTier}) • Extracted: ${formatDate(article.extractedAt)}*\n`);
+  if (article.url) parts.push(`*URL: ${article.url}*\n`);
+  if (article.excerpt) parts.push(`\n> ${article.excerpt}\n`);
+  parts.push('\n---\n\n');
+  parts.push(article.content || '');
+
+  const text = parts.join('').replace(/\n{3,}/g, '\n\n');
+  return {
+    filename: filename(article, 'md'),
+    blob: new Blob([text], { type: 'text/markdown;charset=utf-8' }),
+  };
+}
+
+export function exportArticleText(article) {
+  const lines = [];
+  const title = article.title || 'Article';
+  lines.push(title);
+  lines.push('='.repeat(title.length));
+  if (article.byline) lines.push(article.byline);
+  if (article.siteName) lines.push(article.siteName);
+  if (article.publishedTime) lines.push(article.publishedTime);
+  lines.push(`Source: ${prettySource(article.source)} (${article.extractorTier})    Extracted: ${formatDate(article.extractedAt)}`);
+  if (article.url) lines.push(`URL: ${article.url}`);
+  if (article.excerpt) {
+    lines.push('');
+    lines.push(article.excerpt);
+  }
+  lines.push('');
+  lines.push(stripMarkdown(article.content || ''));
+
+  return {
+    filename: filename(article, 'txt'),
+    blob: new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' }),
+  };
+}
+
+export function exportArticleJSON(article) {
+  return {
+    filename: filename(article, 'json'),
+    blob: new Blob([JSON.stringify(article, null, 2)], { type: 'application/json;charset=utf-8' }),
+  };
+}
+
+export function exportArticleCSV(article) {
+  // Single-row CSV with every field. Awkward but lets people pivot a folder
+  // of RawMode exports into a spreadsheet trivially.
+  const headers = [
+    'title', 'byline', 'siteName', 'lang', 'publishedTime', 'hostname', 'url',
+    'wordCount', 'contentLength', 'extractorTier', 'extractedAt', 'excerpt', 'content',
+  ];
+  const row = [
+    article.title || '',
+    article.byline || '',
+    article.siteName || '',
+    article.lang || '',
+    article.publishedTime || '',
+    article.hostname || '',
+    article.url || '',
+    article.wordCount || 0,
+    article.contentLength || 0,
+    article.extractorTier || '',
+    article.extractedAt || '',
+    article.excerpt || '',
+    article.content || '',
+  ];
+  const csv = [headers, row].map(r => r.map(csvCell).join(',')).join('\r\n');
+  return {
+    filename: filename(article, 'csv'),
+    blob: new Blob(['﻿', csv], { type: 'text/csv;charset=utf-8' }),
+  };
+}
+
 // --- helpers ---
 
 function filename(obj, ext) {
-  // Profiles: {source}-{slug}-{YYYYMMDD}.{ext}
+  // Profiles:      {source}-{slug}-{YYYYMMDD}.{ext}
+  // Articles:      {source}-{hostnameSlug}-{YYYYMMDD}.{ext}
   // Conversations: {source}-{YYYYMMDD}-{sessionId|titleSlug}.{ext}
   // Date is always the export moment — no host exposes creation date in DOM.
   if (obj.kind === 'profile') {
     const date = (obj.extractedAt || new Date().toISOString()).slice(0, 10).replace(/-/g, '');
     const id = obj.slug || titleSlug(obj.name) || 'profile';
+    return `${obj.source}-${id}-${date}.${ext}`;
+  }
+  if (obj.kind === 'article') {
+    const date = (obj.extractedAt || new Date().toISOString()).slice(0, 10).replace(/-/g, '');
+    const id = titleSlug(obj.hostname) || titleSlug(obj.title) || 'page';
     return `${obj.source}-${id}-${date}.${ext}`;
   }
   const date = obj.exportedAt.slice(0, 10).replace(/-/g, '');

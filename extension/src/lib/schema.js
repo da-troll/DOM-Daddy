@@ -2,7 +2,7 @@
 //
 // Conversation = {
 //   kind: 'conversation',
-//   source: 'chatgpt' | 'claude' | 'gemini' | 'perplexity',
+//   source: 'chatgpt' | 'claude' | 'gemini' | 'aistudio' | 'perplexity',
 //   title, url, sessionId?, exportedAt, messages: Message[]
 // }
 //
@@ -16,6 +16,18 @@
 //   source: 'linkedin',
 //   profileUrl, slug, name, headline?,
 //   experiences: Experience[],
+//   extractedAt
+// }
+//
+// Article = {
+//   kind: 'article',
+//   source: 'rawmode',
+//   url, hostname,
+//   title, byline?, siteName?, lang?, publishedTime?, excerpt?,
+//   wordCount, contentLength,
+//   content,  // Markdown (post-conversion via lib/markdown.js)
+//   html,     // cleaned HTML from the extractor tier that won
+//   extractorTier: 'defuddle' | 'semantic-walker' | 'plain-text',
 //   extractedAt
 // }
 //
@@ -45,6 +57,7 @@ export const SOURCE_LABELS = {
   aistudio: 'AI Studio',
   perplexity: 'Perplexity',
   linkedin: 'LinkedIn',
+  rawmode: 'RawMode',
 };
 
 export function prettySource(source) {
@@ -73,6 +86,31 @@ export function makeMessage({ id, role, content, html, reasoning, attachments, t
     ...(reasoning ? { reasoning } : {}),
     ...(attachments && attachments.length ? { attachments } : {}),
     ...(timestamp ? { timestamp } : {}),
+  };
+}
+
+export function makeArticle({
+  url, hostname, title, byline, siteName, lang, publishedTime, excerpt,
+  wordCount, contentLength, content, html, extractorTier,
+}) {
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    kind: 'article',
+    source: 'rawmode',
+    url: url || (typeof location !== 'undefined' ? location.href : ''),
+    hostname: hostname || (typeof location !== 'undefined' ? location.hostname : ''),
+    title: title || 'Untitled article',
+    ...(byline ? { byline } : {}),
+    ...(siteName ? { siteName } : {}),
+    ...(lang ? { lang } : {}),
+    ...(publishedTime ? { publishedTime } : {}),
+    ...(excerpt ? { excerpt } : {}),
+    wordCount: wordCount || 0,
+    contentLength: contentLength || 0,
+    content: content || '',
+    ...(html ? { html } : {}),
+    extractorTier: extractorTier || 'plain-text',
+    extractedAt: new Date().toISOString(),
   };
 }
 
