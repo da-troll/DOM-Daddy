@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DOM Daddy",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Extract structured data from any site. First-class support for ChatGPT, Claude, Gemini, AI Studio, Perplexity chats and LinkedIn experience pages; RawMode handles everything else.",
   "permissions": ["activeTab", "scripting", "storage", "downloads"],
   "host_permissions": [

@@ -310,45 +310,89 @@ function showHint(hint, actionUrl, site) {
   }
 }
 
-// Navigate the current tab to actionUrl and, IF the popup survives the
-// navigation (Chrome action popups sometimes close on tab focus changes),
-// transition into the normal extraction flow once the target page finishes
-// loading. If the popup is killed before navigation completes, the listener
-// dies with it and behavior degrades to today (user re-clicks the icon).
+// Open the target URL in a HIDDEN background tab, wait for it to load, extract
+// from it, then close the background tab. The user's current tab stays focused,
+// the popup never loses focus, and the user ends up with the export data
+// without ever leaving the page they were on.
+//
+// (Earlier attempt: navigate the current tab via chrome.tabs.update() and add
+// a chrome.tabs.onUpdated listener to re-render the popup. That doesn't work —
+// Chrome action popups consistently close when the active tab navigates.)
 async function navigateAndAwaitReady(actionUrl, site) {
   if (!cachedTab?.id) return;
   els.hintAction.disabled = true;
-  setStatus('Navigating…');
+  setStatus('Loading…');
 
-  let resolved = false;
-  const onUpdated = (tabId, changeInfo, tab) => {
-    if (tabId !== cachedTab.id || resolved) return;
-    if (changeInfo.status !== 'complete') return;
-    if (!tab?.url || !site.pageReady?.(tab.url)) return;
-    resolved = true;
-    chrome.tabs.onUpdated.removeListener(onUpdated);
-    cachedTab = tab;
-    els.hint.hidden = true;
-    els.hintAction.hidden = true;
-    els.hintAction.disabled = false;
-    setStatus(`Detected: ${prettySource(site.source)}`, 'detect');
-    runExtractionFlow(tab, site);
-  };
-  chrome.tabs.onUpdated.addListener(onUpdated);
-
-  // Safety net — if the navigation never completes, drop the listener.
-  setTimeout(() => {
-    if (!resolved) chrome.tabs.onUpdated.removeListener(onUpdated);
-  }, 30_000);
-
+  let bgTab;
   try {
-    await chrome.tabs.update(cachedTab.id, { url: actionUrl });
+    bgTab = await chrome.tabs.create({ url: actionUrl, active: false });
   } catch (err) {
-    chrome.tabs.onUpdated.removeListener(onUpdated);
-    setStatus('Navigation failed', 'error');
+    setStatus("Couldn't open page", 'error');
     els.hintAction.disabled = false;
     console.error(err);
+    return;
   }
+
+  const closeBg = () => chrome.tabs.remove(bgTab.id).catch(() => {});
+
+  let loadedTab;
+  try {
+    loadedTab = await awaitTabReady(bgTab.id, site);
+  } catch (err) {
+    setStatus('Page load timed out', 'error');
+    els.hintAction.disabled = false;
+    await closeBg();
+    return;
+  }
+
+  setStatus('Reading…');
+  let data;
+  try {
+    data = await requestExtraction(loadedTab.id, site);
+  } catch (err) {
+    setStatus("Couldn't read experience page", 'error');
+    els.hintAction.disabled = false;
+    await closeBg();
+    console.error(err);
+    return;
+  }
+  await closeBg();
+
+  if (!isUseful(data, site.kind)) {
+    setStatus('Nothing to export on this page', 'error');
+    els.hintAction.disabled = false;
+    return;
+  }
+
+  cachedData = data;
+  // cachedTab stays as the user's original tab — downloads still get attributed
+  // to where they actually are. The background tab is gone by now anyway.
+  els.hint.hidden = true;
+  els.hintAction.hidden = true;
+  els.hintAction.disabled = false;
+  setStatus(`Detected: ${prettySource(site.source)}`, 'detect');
+  populateMeta(data, site);
+  configureUI(site);
+  revealFormatButtons();
+  els.defaultFmt?.focus();
+}
+
+function awaitTabReady(tabId, site) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      reject(new Error('timeout'));
+    }, 30_000);
+    const onUpdated = (changedId, changeInfo, tab) => {
+      if (changedId !== tabId) return;
+      if (changeInfo.status !== 'complete') return;
+      if (!tab?.url || !site.pageReady?.(tab.url)) return;
+      clearTimeout(timeout);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      resolve(tab);
+    };
+    chrome.tabs.onUpdated.addListener(onUpdated);
+  });
 }
 
 // ---------- Format-click + downloads ----------
