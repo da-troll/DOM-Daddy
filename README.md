@@ -9,6 +9,10 @@
                    E X T R A C T   A N Y T H I N G
 ```
 
+<p align="center">
+  <img src="docs/hero.png" alt="DOM Daddy" width="320">
+</p>
+
 A Manifest V3 Chrome extension that extracts structured data from sites that fight scraping. Currently:
 
 - **ChatGPT, Claude, Gemini, AI Studio, Perplexity** chats → Markdown / Text / JSON / CSV
