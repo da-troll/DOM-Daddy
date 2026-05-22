@@ -17,6 +17,30 @@ A Manifest V3 Chrome extension that extracts structured data from sites that fig
 
 Pure client-side. No server, no build step at runtime, no analytics. One vendored dependency: [Defuddle](https://github.com/kepano/defuddle) (MIT, ~290 KB ESM bundle) powers RawMode's article parsing.
 
+## Project structure
+
+```
+extension/
+  manifest.json
+  src/
+    background/            Thin service worker (lifecycle hooks only)
+    content/               One extractor per supported host
+      chatgpt.js  claude.js  gemini.js  aistudio.js  perplexity.js
+      rawmode.js           generic extractor for unsupported sites (on-demand)
+      linkedin.js          /in/{slug}/details/experience/
+    lib/
+      schema.js            Conversation / Profile / Article types (kind discriminator)
+      markdown.js          HTML -> Markdown converter (no deps)
+      defuddle.js          vendored Defuddle bundle, powers RawMode
+    exporters/
+      exporters.js         export{Markdown,Text,JSON,CSV} for conversations
+                           export{ProfileMarkdown,ProfileText,ProfileJSON,ProfileCSV} for profiles
+                           export{ArticleMarkdown,ArticleText,ArticleJSON,ArticleCSV} for RawMode
+    popup/
+      popup.html / .css / .js   User-facing UI; branches on result kind
+  icons/
+```
+
 ## RawMode
 
 On any unsupported site the popup shows `Unsupported site – RawMode Active` and a single `Analyze Page` button. Clicking it injects a generic content script that runs a **tiered extraction pipeline**:
@@ -40,28 +64,6 @@ For LinkedIn specifically: open your (or another user's) profile, click **Show a
 Works on any Chromium browser (Chrome, Edge, Brave, Arc, etc.).
 
 ## Architecture
-
-```
-extension/
-  manifest.json
-  src/
-    background/            Thin service worker (lifecycle hooks only)
-    content/               One extractor per supported host
-      chatgpt.js  claude.js  gemini.js  aistudio.js  perplexity.js
-      rawmode.js           generic extractor for unsupported sites (on-demand)
-      linkedin.js          /in/{slug}/details/experience/
-    lib/
-      schema.js            Conversation / Profile / Article types (kind discriminator)
-      markdown.js          HTML -> Markdown converter (no deps)
-      defuddle.js          vendored Defuddle bundle, powers RawMode
-    exporters/
-      exporters.js         export{Markdown,Text,JSON,CSV} for conversations
-                           export{ProfileMarkdown,ProfileText,ProfileJSON,ProfileCSV} for profiles
-                           export{ArticleMarkdown,ArticleText,ArticleJSON,ArticleCSV} for RawMode
-    popup/
-      popup.html / .css / .js   User-facing UI; branches on result kind
-  icons/
-```
 
 ### Data flow
 
