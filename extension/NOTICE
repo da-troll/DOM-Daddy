@@ -1,0 +1,68 @@
+DOM Daddy
+Copyright 2025–2026 Trollefsen Labs
+
+This product is licensed under the Apache License, Version 2.0 (the "License");
+see the LICENSE file in this repository or http://www.apache.org/licenses/LICENSE-2.0
+for the full text.
+
+================================================================================
+Trademarks, name, and visual assets — NOT covered by the Apache 2.0 license
+================================================================================
+
+The following are reserved and remain the exclusive property of Trollefsen Labs.
+They are NOT licensed under Apache 2.0 (which, per Section 6, does not grant
+trademark rights in any case):
+
+  * The name "DOM Daddy"
+  * The DOM Daddy mascot character and any derivative artwork
+  * All image and icon files under extension/icons/ (icon16.png, icon24.png,
+    icon32.png, icon48.png, icon64.png, icon128.png, icon256.png, and any
+    successor files in that directory)
+  * favicon.ico in the repository root
+  * Any other logo, wordmark, or brand asset bearing the DOM Daddy name or
+    mascot, whether or not currently checked into this repository
+
+Permitted forks and derivative works MUST:
+
+  1. Choose a different product name (do not use "DOM Daddy" or any name
+     confusingly similar) for any published, distributed, or store-listed
+     derivative.
+  2. Replace all icon files and brand artwork with their own assets before
+     publication to the Chrome Web Store, any other extension marketplace,
+     or any public distribution channel.
+  3. Remove the DOM Daddy mascot from any user-visible surfaces.
+
+The source code itself (everything else in this repository, including all
+files under extension/src/) is freely usable under the Apache 2.0 terms,
+including for commercial purposes, subject to the obligations in that license.
+
+Questions about the brand or licensing exceptions: daniel@trollefsen.com
+
+================================================================================
+Third-party software bundled with DOM Daddy
+================================================================================
+
+* Defuddle (https://github.com/kepano/defuddle)
+  Copyright (c) 2025 Steph Ango (@kepano)
+  Licensed under the MIT License.
+  Bundled at: extension/src/lib/defuddle.js (esbuild ESM bundle of v0.18.1)
+
+  MIT License text reproduced below as required by the license:
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+  THE SOFTWARE.

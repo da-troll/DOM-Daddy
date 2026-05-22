@@ -3,6 +3,7 @@
   "name": "DOM Daddy",
   "version": "0.5.5",
   "description": "Extract structured data from any site. First-class support for ChatGPT, Claude, Gemini, AI Studio, Perplexity chats and LinkedIn experience pages; RawMode handles everything else.",
+  "homepage_url": "https://github.com/da-troll/DOM-Daddy",
   "permissions": ["activeTab", "scripting", "storage", "downloads"],
   "host_permissions": [
     "https://chatgpt.com/*",
