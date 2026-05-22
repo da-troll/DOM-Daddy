@@ -29,24 +29,28 @@ Pure client-side. No server, no build step at runtime, no analytics. One vendore
 
 ```
 extension/
-  manifest.json
-  src/
-    background/            Thin service worker (lifecycle hooks only)
-    content/               One extractor per supported host
-      chatgpt.js  claude.js  gemini.js  aistudio.js  perplexity.js
-      rawmode.js           generic extractor for unsupported sites (on-demand)
-      linkedin.js          /in/{slug}/details/experience/
-    lib/
-      schema.js            Conversation / Profile / Article types (kind discriminator)
-      markdown.js          HTML -> Markdown converter (no deps)
-      defuddle.js          vendored Defuddle bundle, powers RawMode
-    exporters/
-      exporters.js         export{Markdown,Text,JSON,CSV} for conversations
-                           export{ProfileMarkdown,ProfileText,ProfileJSON,ProfileCSV} for profiles
-                           export{ArticleMarkdown,ArticleText,ArticleJSON,ArticleCSV} for RawMode
-    popup/
-      popup.html / .css / .js   User-facing UI; branches on result kind
-  icons/
+├── manifest.json
+├── src/
+│   ├── background/             Thin service worker (lifecycle hooks only)
+│   ├── content/                One extractor per supported host
+│   │   ├── chatgpt.js
+│   │   ├── claude.js
+│   │   ├── gemini.js
+│   │   ├── aistudio.js
+│   │   ├── perplexity.js
+│   │   ├── rawmode.js          generic extractor for unsupported sites (on-demand)
+│   │   └── linkedin.js         /in/{slug}/details/experience/
+│   ├── lib/
+│   │   ├── schema.js           Conversation / Profile / Article types (kind discriminator)
+│   │   ├── markdown.js         HTML → Markdown converter (no deps)
+│   │   └── defuddle.js         vendored Defuddle bundle, powers RawMode
+│   ├── exporters/
+│   │   └── exporters.js        export{Markdown,Text,JSON,CSV} for conversations
+│   │                           export{ProfileMarkdown,ProfileText,ProfileJSON,ProfileCSV} for profiles
+│   │                           export{ArticleMarkdown,ArticleText,ArticleJSON,ArticleCSV} for RawMode
+│   └── popup/
+│       └── popup.html / .css / .js   User-facing UI; branches on result kind
+└── icons/
 ```
 
 ## RawMode
