@@ -7,7 +7,6 @@
 ╚═════╝░░╚════╝░╚═╝░░░░░╚═╝░░╚═════╝░╚═╝░░╚═╝╚═════╝░╚═════╝░░░░╚═╝░░░
 
                    E X T R A C T   A N Y T H I N G
-                          by Trollefsen Labs
 ```
 
 A Manifest V3 Chrome extension that extracts structured data from sites that fight scraping. Currently:
