@@ -176,7 +176,7 @@ async function runExtractionFlow(tab, site) {
 // ---------- RawMode ----------
 
 async function initRawMode(tab) {
-  setStatus('Unsupported site – RawMode Active', 'raw');
+  setStatus('Unknown site. Using RawMode', 'raw');
   cachedSite = RAWMODE_SITE;
 
   // Try to restore a cached analysis for this exact tab+url so re-opening the
