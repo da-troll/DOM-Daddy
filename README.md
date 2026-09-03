@@ -56,7 +56,7 @@ extension/
 
 ## RawMode
 
-On any site not in the registry the popup shows `Unknown site. Using RawMode` and a single `Analyze Page` button. Clicking it injects a generic content script that runs a **tiered extraction pipeline**:
+On any site not in the registry the popup shows `Unknown site. Using RawMode...` and a single `Analyze Page` button. Clicking it injects a generic content script that runs a **tiered extraction pipeline**:
 
 1. **Defuddle** — full-fidelity article parsing on a re-parsed DOM clone (Defuddle is destructive). Returns title, byline, siteName, language, publishedTime, excerpt, word count, plus cleaned HTML. Then `lib/markdown.js` converts the HTML to Markdown.
 2. **Semantic walker** — first `<main>` / `<article>` / `[role="main"]` element, with nav/aside/header/footer/script stripped, run through `htmlToMarkdown`. Used when Defuddle returns no useful content.
