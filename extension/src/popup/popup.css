@@ -99,10 +99,11 @@ html, body {
 main { padding: 16px; }
 
 /* Segmented control: global toggle for what the four format buttons do —
-   download a file (default) vs copy the built output to the clipboard.
-   Deliberately styled to NOT look like the action buttons: a compact,
-   pill-shaped, recessed track with a neutral raised thumb. Mauve is reserved
-   for the format buttons, so the active segment stays grey. */
+   download a file vs copy the built output to the clipboard. A compact,
+   pill-shaped, recessed track; the active segment is a translucent mauve
+   "glass" thumb (tinted, blurred backdrop, soft mauve edge) so it clearly
+   reads as selected while staying visually lighter than the solid mauve
+   primary format button below it. */
 .mode {
   display: flex;
   gap: 2px;
@@ -122,20 +123,27 @@ main { padding: 16px; }
   font-weight: 600;
   letter-spacing: 0.03em;
   padding: 5px 8px;
-  border: none;
+  border: 1px solid transparent;
   background: transparent;
   color: var(--muted);
   border-radius: 999px;
   cursor: pointer;
-  transition: background 0.12s, color 0.12s;
+  transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
 
 .mode__opt:hover { color: var(--fg); }
 
 .mode__opt.is-active {
-  background: var(--hover);
-  color: var(--fg);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  color: #f5e0ff;
+  background: linear-gradient(180deg, rgba(203, 166, 247, 0.38), rgba(203, 166, 247, 0.22));
+  border-color: rgba(203, 166, 247, 0.55);
+  -webkit-backdrop-filter: blur(6px) saturate(160%);
+  backdrop-filter: blur(6px) saturate(160%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 1px 3px rgba(0, 0, 0, 0.35),
+    0 0 0 1px rgba(203, 166, 247, 0.12);
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.25);
 }
 
 .formats {
