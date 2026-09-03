@@ -1,16 +1,17 @@
 {
   "manifest_version": 3,
   "name": "DOM Daddy",
-  "version": "0.6.0",
-  "description": "Extract structured data from any site. First-class support for ChatGPT, Claude, Gemini, AI Studio, Perplexity chats and LinkedIn experience pages; RawMode handles everything else.",
+  "version": "0.7.0",
+  "description": "Extract structured data from any site. First-class support for ChatGPT, Claude, Gemini, Google AI Mode, AI Studio, Perplexity chats and LinkedIn experience pages; RawMode handles everything else.",
   "homepage_url": "https://github.com/da-troll/DOM-Daddy",
-  "permissions": ["activeTab", "scripting", "storage", "downloads"],
+  "permissions": ["activeTab", "scripting", "storage", "downloads", "clipboardWrite"],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
     "https://claude.ai/*",
     "https://gemini.google.com/*",
     "https://aistudio.google.com/*",
+    "https://www.google.com/search*",
     "https://www.perplexity.ai/*",
     "https://perplexity.ai/*",
     "https://www.linkedin.com/*"
@@ -50,6 +51,11 @@
     {
       "matches": ["https://aistudio.google.com/*"],
       "js": ["src/content/aistudio.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.google.com/search*"],
+      "js": ["src/content/aimode.js"],
       "run_at": "document_idle"
     },
     {

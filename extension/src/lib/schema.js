@@ -54,6 +54,7 @@ export const SOURCE_LABELS = {
   chatgpt: 'ChatGPT',
   claude: 'Claude',
   gemini: 'Gemini',
+  aimode: 'Google AI Mode',
   aistudio: 'AI Studio',
   perplexity: 'Perplexity',
   linkedin: 'LinkedIn',

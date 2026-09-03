@@ -19,7 +19,7 @@
 
 A Manifest V3 Chrome extension that extracts structured data from sites that fight scraping. Currently:
 
-- **ChatGPT, Claude, Gemini, AI Studio, Perplexity** chats → Markdown / Text / JSON / CSV
+- **ChatGPT, Claude, Gemini, Google AI Mode, AI Studio, Perplexity** chats → Markdown / Text / JSON / CSV
 - **LinkedIn** experience pages (`/in/{you}/details/experience/`) → Markdown / Text / JSON / CSV (one row per role)
 - **Anything else** → **RawMode**, a two-step generic extractor for any site not in the list above
 
@@ -36,6 +36,7 @@ extension/
 │   │   ├── chatgpt.js
 │   │   ├── claude.js
 │   │   ├── gemini.js
+│   │   ├── aimode.js                 # Google AI Mode (google.com/search?udm=50)
 │   │   ├── aistudio.js
 │   │   ├── perplexity.js
 │   │   ├── rawmode.js                # Generic extractor for unsupported sites (on-demand)
@@ -69,7 +70,7 @@ The chosen tier is recorded in the export's `extractorTier` field so you can spo
 2. Toggle **Developer mode** on (top-right).
 3. Click **Load unpacked** and select the `extension/` directory in this repo.
 4. Pin the extension to the toolbar.
-5. Open a supported page, click the icon, choose a format.
+5. Open a supported page, click the icon, choose a format. The Download / Copy toggle above the format buttons decides whether the result is saved as a file or copied to the clipboard; the choice is remembered.
 
 For LinkedIn specifically: open your (or another user's) profile, click **Show all experience**, and run DOM Daddy on the resulting `…/details/experience/` page. The popup will offer a "Take me there" shortcut if you click it on the wrong sub-page.
 
@@ -99,6 +100,7 @@ MV3 doesn't allow content scripts to be declared as ES modules. To still share `
   - ChatGPT: `[data-message-author-role]` / `[data-message-id]` inside `section[data-turn]`. The thread is virtualized with per-turn placeholder slots (no `[data-turn]` until scrolled into view), so the extractor scrolls each slot into view top→bottom and harvests as turns mount. In-prose file chips / download buttons are kept as text.
   - Claude: `[data-testid="transcript-row"]` → `[role="article"][aria-posinset]`; user text in `[data-testid="user-message"]`, assistant in `[data-is-streaming]`. The transcript is a windowed virtual list, so the extractor scrolls top→bottom and harvests rows by position until it has `aria-setsize` messages.
   - Gemini: `user-query`, `model-response` (Angular component tags). Gemini lazy-loads older turns when scrolled to the top, so the extractor scrolls up repeatedly until the turn count stops growing.
+  - Google AI Mode: `[data-scope-id="turn"]` per turn; the query is the turn's `<h2>` ("You said: …"), the answer is `[data-subtree="aimc"] [data-container-id="main-col"]`. Headings are `div[role=heading][aria-level]` and are rewritten to `<hN>`; the disclaimer/share footer block is dropped. Only `google.com/search` URLs with `udm=50` or an `mtid` count as AI Mode — every other Google page falls through to RawMode.
   - AI Studio: `ms-chat-turn` → `.user-prompt-container` / `.model-prompt-container` → `.turn-content`; reasoning in `<ms-thought-chunk>`. Uses CDK virtual scrolling, so the extractor scrolls the chat top→bottom and harvests each turn as it mounts.
   - Perplexity: `[class~="group/user-bubble"]` for user queries, `[data-workflow-final-text] .prose` for answers. The thread is virtualized (off-screen turns are empty placeholders), so the extractor scrolls each slot into view and harvests as it mounts; citation pills are rewritten to links.
   - LinkedIn: `[componentkey^="entity-collection-item-"]` per company entry; we parse `innerText` line-by-line and ignore hashed CSS classes entirely.

@@ -19,6 +19,11 @@
     <p id="hint" class="hint" hidden></p>
     <button id="hint-action" class="hint-action" hidden>Take me there</button>
 
+    <div class="mode" id="mode" role="group" aria-label="Button action" hidden>
+      <button type="button" class="mode__opt" data-mode="download" id="mode-download" aria-pressed="false">Download</button>
+      <button type="button" class="mode__opt is-active" data-mode="clipboard" id="mode-clipboard" aria-pressed="true">Copy</button>
+    </div>
+
     <section class="formats" id="formats" hidden>
       <button class="fmt fmt--analyze" id="analyze-btn" hidden>Analyze Page</button>
       <button class="fmt fmt--primary" data-format="md" id="default-fmt" hidden>Markdown</button>
@@ -29,7 +34,7 @@
 
     <label class="option" id="options" hidden>
       <input type="checkbox" id="opt-reasoning" checked>
-      <span>Include reasoning / thinking blocks</span>
+      <span>Include reasoning blocks</span>
     </label>
   </main>
 

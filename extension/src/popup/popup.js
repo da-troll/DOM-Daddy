@@ -27,6 +27,15 @@ const SITES = {
   'claude.ai':           { source: 'claude',     kind: 'conversation', script: 'src/content/claude.js' },
   'gemini.google.com':   { source: 'gemini',     kind: 'conversation', script: 'src/content/gemini.js' },
   'aistudio.google.com': { source: 'aistudio',   kind: 'conversation', script: 'src/content/aistudio.js', refreshOnExport: false },
+  // Google AI Mode lives on ordinary google.com search URLs (?udm=50, or a
+  // thread id in ?mtid=). Any other google.com page falls through to RawMode.
+  'www.google.com': {
+    source: 'aimode',
+    kind: 'conversation',
+    script: 'src/content/aimode.js',
+    pageReady: (url) => { const p = new URL(url).searchParams; return p.get('udm') === '50' || p.has('mtid'); },
+    rawModeWhenNotReady: true,
+  },
   'www.perplexity.ai':   { source: 'perplexity', kind: 'conversation', script: 'src/content/perplexity.js' },
   'perplexity.ai':       { source: 'perplexity', kind: 'conversation', script: 'src/content/perplexity.js' },
   'www.linkedin.com':    {
@@ -64,11 +73,14 @@ const RAWMODE_SITE = {
 };
 
 const els = {
-  status:       document.getElementById('status'),
-  metaTitle:    document.getElementById('meta-title'),
-  metaSub:      document.getElementById('meta-sub'),
-  options:      document.getElementById('options'),
-  formats:      document.getElementById('formats'),
+  status:        document.getElementById('status'),
+  metaTitle:     document.getElementById('meta-title'),
+  metaSub:       document.getElementById('meta-sub'),
+  options:       document.getElementById('options'),
+  formats:       document.getElementById('formats'),
+  mode:          document.getElementById('mode'),
+  modeDownload:  document.getElementById('mode-download'),
+  modeClipboard: document.getElementById('mode-clipboard'),
   optReasoning: document.getElementById('opt-reasoning'),
   defaultFmt:   document.getElementById('default-fmt'),
   analyzeBtn:   document.getElementById('analyze-btn'),
@@ -83,9 +95,18 @@ let cachedData = null;
 let cachedSite = null;
 let cachedTab = null;
 
+// Global toggle: 'clipboard' (copy the built output — the default) or
+// 'download' (save a file). Persisted in chrome.storage.local so it survives
+// popup closes and browser restarts, and applies across every supported site.
+const MODE_KEY = 'exportMode';
+let exportMode = 'clipboard';
+
 init();
 
 async function init() {
+  await loadExportMode();
+  els.mode?.addEventListener('click', onModeClick);
+
   const tab = await getActiveTab();
   cachedTab = tab;
   if (!tab?.url) {
@@ -97,7 +118,10 @@ async function init() {
   try { host = new URL(tab.url).hostname; }
   catch { host = ''; }
 
-  const site = SITES[host];
+  let site = SITES[host];
+  // Hosts that are only "supported" on some URLs (Google AI Mode on
+  // google.com) drop to RawMode everywhere else instead of showing a hint.
+  if (site?.rawModeWhenNotReady && site.pageReady && !site.pageReady(tab.url)) site = undefined;
 
   if (!site) {
     // Unsupported host → RawMode.
@@ -266,6 +290,7 @@ function configureUI(site) {
 
 function revealFormatButtons() {
   els.formats.hidden = false;
+  if (els.mode)       els.mode.hidden = false;
   if (els.analyzeBtn) els.analyzeBtn.hidden = true;
   if (els.defaultFmt) els.defaultFmt.hidden = false;
   if (els.fmtTxt)     els.fmtTxt.hidden = false;
@@ -276,11 +301,42 @@ function revealFormatButtons() {
 function hideExportUI() {
   els.formats.hidden = true;
   els.options.hidden = true;
+  if (els.mode) els.mode.hidden = true;
   if (els.analyzeBtn) els.analyzeBtn.hidden = true;
   if (els.defaultFmt) els.defaultFmt.hidden = true;
   if (els.fmtTxt)     els.fmtTxt.hidden = true;
   if (els.fmtJson)    els.fmtJson.hidden = true;
   if (els.fmtCsv)     els.fmtCsv.hidden = true;
+}
+
+// ---------- Export-mode toggle (download vs clipboard) ----------
+
+async function loadExportMode() {
+  try {
+    const out = await chrome.storage.local.get(MODE_KEY);
+    if (out?.[MODE_KEY] === 'clipboard' || out?.[MODE_KEY] === 'download') {
+      exportMode = out[MODE_KEY];
+    }
+  } catch { /* fall back to the default 'download' */ }
+  reflectMode();
+}
+
+function reflectMode() {
+  const clip = exportMode === 'clipboard';
+  els.modeDownload?.classList.toggle('is-active', !clip);
+  els.modeClipboard?.classList.toggle('is-active', clip);
+  els.modeDownload?.setAttribute('aria-pressed', String(!clip));
+  els.modeClipboard?.setAttribute('aria-pressed', String(clip));
+}
+
+function onModeClick(e) {
+  const btn = e.target.closest('button[data-mode]');
+  if (!btn) return;
+  const mode = btn.dataset.mode;
+  if ((mode !== 'download' && mode !== 'clipboard') || mode === exportMode) return;
+  exportMode = mode;
+  reflectMode();
+  chrome.storage.local.set({ [MODE_KEY]: mode }).catch(() => { /* non-fatal */ });
 }
 
 function showHint(hint, actionUrl, site) {
@@ -354,8 +410,21 @@ async function onFormatClick(e) {
     } catch { /* fall through with cached version */ }
   }
 
+  // Content is fully built at this point (including any refreshOnExport
+  // re-extract above and per-site scans done during extraction). Only the
+  // final delivery differs between the two modes.
   const result = runExport(cachedData, cachedSite.kind, format);
   if (!result) return;
+
+  if (exportMode === 'clipboard') {
+    const outcome = await copyToClipboard(result.blob);
+    if (outcome.copied) {
+      setStatus(`Copied ${format.toUpperCase()} to clipboard`, 'ok');
+    } else {
+      setStatus('Copy failed', 'error');
+    }
+    return;
+  }
 
   const outcome = await downloadBlob(result.filename, result.blob);
   if (outcome.saved) {
@@ -364,6 +433,51 @@ async function onFormatClick(e) {
     setStatus('Canceled', 'ok');
   } else {
     setStatus('Download failed', 'error');
+  }
+}
+
+// Copy the built export text to the clipboard. The exporters return text-based
+// blobs (Markdown / plain text / JSON / CSV), so we read the blob back as text
+// rather than re-deriving it — the clipboard gets byte-for-byte what a download
+// would have contained.
+async function copyToClipboard(blob) {
+  let text;
+  try {
+    text = await blob.text();
+  } catch (err) {
+    console.error(err);
+    return { copied: false };
+  }
+
+  // CSV exports prepend a UTF-8 BOM so Excel opens the file as UTF-8. On the
+  // clipboard that BOM is just an invisible stray character, so drop it.
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+
+  try {
+    await navigator.clipboard.writeText(text);
+    return { copied: true };
+  } catch (err) {
+    // A slow refreshOnExport re-extract can outlast the click's transient user
+    // activation, which the async Clipboard API requires. Fall back to the
+    // execCommand path, which only needs the popup document to be focused.
+    console.debug('[DOM Daddy] clipboard.writeText failed, trying execCommand', err);
+  }
+
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return { copied: ok };
+  } catch (err) {
+    console.error(err);
+    return { copied: false };
   }
 }
 
