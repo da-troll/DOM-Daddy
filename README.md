@@ -87,7 +87,7 @@ Popup opened
   -> chrome.downloads delivers the file
 ```
 
-The shared schema (`extension/src/lib/schema.js`) is the contract between extractors and exporters. Two shapes today: `Conversation` (`kind: 'conversation'`) and `Profile` (`kind: 'profile'`).
+The shared schema (`extension/src/lib/schema.js`) is the contract between extractors and exporters. Three shapes today: `Conversation` (`kind: 'conversation'`), `Profile` (`kind: 'profile'`) and `Article` (`kind: 'article'`, RawMode).
 
 ### Why dynamic `import()` in content scripts?
 
@@ -96,16 +96,17 @@ MV3 doesn't allow content scripts to be declared as ES modules. To still share `
 ## Known limitations
 
 - **Selectors drift.** When a site reorganizes, only that site's content script needs to change. Stable anchors:
-  - ChatGPT: `[data-message-author-role]`, `[data-message-id]`
-  - Claude: `[data-testid="user-message"]`, `.font-claude-message`
-  - Gemini: `user-query`, `model-response` (Angular component tags)
+  - ChatGPT: `[data-message-author-role]` / `[data-message-id]` inside `section[data-turn]`. The thread is virtualized with per-turn placeholder slots (no `[data-turn]` until scrolled into view), so the extractor scrolls each slot into view top→bottom and harvests as turns mount. In-prose file chips / download buttons are kept as text.
+  - Claude: `[data-testid="transcript-row"]` → `[role="article"][aria-posinset]`; user text in `[data-testid="user-message"]`, assistant in `[data-is-streaming]`. The transcript is a windowed virtual list, so the extractor scrolls top→bottom and harvests rows by position until it has `aria-setsize` messages.
+  - Gemini: `user-query`, `model-response` (Angular component tags). Gemini lazy-loads older turns when scrolled to the top, so the extractor scrolls up repeatedly until the turn count stops growing.
   - AI Studio: `ms-chat-turn` → `.user-prompt-container` / `.model-prompt-container` → `.turn-content`; reasoning in `<ms-thought-chunk>`. Uses CDK virtual scrolling, so the extractor scrolls the chat top→bottom and harvests each turn as it mounts.
-  - Perplexity: `[class~="group/query"]` for queries, `.prose` for answers
+  - Perplexity: `[class~="group/user-bubble"]` for user queries, `[data-workflow-final-text] .prose` for answers. The thread is virtualized (off-screen turns are empty placeholders), so the extractor scrolls each slot into view and harvests as it mounts; citation pills are rewritten to links.
   - LinkedIn: `[componentkey^="entity-collection-item-"]` per company entry; we parse `innerText` line-by-line and ignore hashed CSS classes entirely.
-- **Virtualized / collapsed UIs lose data.** Chat sites unmount off-screen messages; "Show thinking" details and LinkedIn's `…see more` may collapse content. Scroll/expand before extracting. For AI Studio specifically, the extractor scrolls top→bottom automatically on popup open.
+- **Extraction scrolls the page.** Every chat host virtualizes or lazy-loads its transcript, so the extractors scroll through the conversation themselves, wait for turns to mount, and restore your scroll position afterwards. A long thread can take 20–60 s; keep the tab in the foreground while it runs — a background tab renders no frames, so nothing mounts. If an export still comes up short, the browser console will show a `[DOM Daddy]` warning saying how many turns never mounted.
+- **Collapsed UIs lose data.** "Show thinking" details and LinkedIn's `…see more` may collapse content. Expand before extracting. Claude's collapsed thinking is not in the DOM at all; only the "Thought for Ns" label is.
 - **LinkedIn React hydration race.** The `entity-collection-item-*` entries on the experience page render after the load event fires. The popup polls for up to ~6 seconds while LinkedIn hydrates, so a fast re-open immediately after navigation will wait briefly rather than fail.
 - **LinkedIn `+N skills`.** The "+N skills" overflow on roles can't be pulled without clicking the chip — we capture the visible skills and store the hidden count as `hiddenSkillCount`.
-- **Canvas / Artifacts** (ChatGPT side panel, Claude artifacts) aren't currently captured.
+- **Canvas / Artifacts** (ChatGPT side panel, Claude artifacts) contents aren't captured. Generated-file chips, download links and artifact cards are recorded by name in the message's `attachments` and kept as text in the Markdown.
 - **No real chat timestamps.** None of the chat hosts expose creation date or per-message timestamps in the DOM, so the date in the filename is the export date.
 
 ### Filenames and download-manager extensions
@@ -117,6 +118,8 @@ If the Save As dialog shows a *different* filename than what we suggested, anoth
 Known offender: **Suno Tracks Exporter**. Disable it (or any other download-manager extension) while exporting if you need the suggested filename to land.
 
 ## Extending
+
+Agent-facing guidance (architecture, DOM anchors, how to validate against a saved page or a live tab) lives in [`AGENTS.md`](AGENTS.md); `CLAUDE.md` is a symlink to it.
 
 ### Add a new conversation host
 

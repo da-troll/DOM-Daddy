@@ -16,7 +16,49 @@
     thinking: 'thought-process, [data-test-id="thinking-block"]',
   };
 
-  function extractGemini() {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  function findScrollRoot(fromEl) {
+    let el = fromEl;
+    while (el) {
+      const cs = getComputedStyle(el);
+      if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 4) return el;
+      el = el.parentElement;
+    }
+    return document.scrollingElement || document.documentElement;
+  }
+
+  // Gemini lazy-loads older turns when the conversation is scrolled to the
+  // top. Keep scrolling up until the turn count stops growing, then restore
+  // the user's position. Harmless on short chats (one pass, nothing loads).
+  async function loadAllTurns() {
+    const first = document.querySelector(SELECTORS.userQuery) || document.querySelector(SELECTORS.modelResponse);
+    if (!first) return;
+    const root = findScrollRoot(first);
+    const saved = root.scrollTop;
+    const count = () => document.querySelectorAll(`${SELECTORS.userQuery}, ${SELECTORS.modelResponse}`).length;
+    let prev = -1, cur = count(), rounds = 0;
+    while (cur !== prev && rounds < 60) {
+      prev = cur;
+      // Nudge so a scroll event fires even if we're already at the top.
+      root.scrollTop = 1;
+      await sleep(30);
+      root.scrollTop = 0;
+      // Give the loader a moment; poll for growth up to ~4s.
+      const start = performance.now();
+      while (performance.now() - start < 4000) {
+        await sleep(100);
+        if (count() > prev) break;
+      }
+      cur = count();
+      rounds++;
+    }
+    if (cur !== prev) console.warn(`[DOM Daddy] Gemini: gave up after ${rounds} scroll rounds with ${cur} turns; export may be incomplete.`);
+    root.scrollTop = saved;
+  }
+
+  async function extractGemini() {
+    await loadAllTurns();
     // Walk turns in document order by selecting both kinds and sorting.
     const userNodes = Array.from(document.querySelectorAll(SELECTORS.userQuery));
     const modelNodes = Array.from(document.querySelectorAll(SELECTORS.modelResponse));
@@ -104,12 +146,10 @@
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg?.type === 'EXTRACT') {
-      try {
-        sendResponse({ ok: true, data: extractGemini() });
-      } catch (err) {
-        sendResponse({ ok: false, error: String(err?.message || err) });
-      }
-      return true;
+      extractGemini()
+        .then(conv => sendResponse({ ok: true, data: conv }))
+        .catch(err => sendResponse({ ok: false, error: String(err?.message || err) }));
+      return true; // async
     }
   });
 })();
