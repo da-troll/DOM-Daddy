@@ -74,6 +74,7 @@ const RAWMODE_SITE = {
 
 const els = {
   status:        document.getElementById('status'),
+  refreshBtn:    document.getElementById('refresh-btn'),
   metaTitle:     document.getElementById('meta-title'),
   metaSub:       document.getElementById('meta-sub'),
   options:       document.getElementById('options'),
@@ -95,6 +96,12 @@ let cachedData = null;
 let cachedSite = null;
 let cachedTab = null;
 
+// Bumped on every detect/extract pass. A pass whose generation is no longer
+// current (the user hit refresh while it was still scrolling the page) drops
+// its result instead of overwriting the newer one.
+let generation = 0;
+let refreshing = false;
+
 // Global toggle: 'clipboard' (copy the built output — the default) or
 // 'download' (save a file). Persisted in chrome.storage.local so it survives
 // popup closes and browser restarts, and applies across every supported site.
@@ -106,10 +113,39 @@ init();
 async function init() {
   await loadExportMode();
   els.mode?.addEventListener('click', onModeClick);
+  els.formats.addEventListener('click', onFormatClick);
+  els.analyzeBtn?.addEventListener('click', onAnalyzeClick);
+  els.refreshBtn?.addEventListener('click', onRefreshClick);
+  await detectAndExtract();
+}
+
+// Refresh button: re-run the whole detect → extract pass against the page as
+// it is *now*. Chats keep growing after the popup first read them, and SPAs
+// can navigate to a different thread without a page load, so re-query the tab
+// too rather than reusing cachedTab. On RawMode this re-analyzes immediately
+// (the click is the opt-in the Analyze button would otherwise ask for).
+async function onRefreshClick() {
+  if (refreshing) return;
+  refreshing = true;
+  els.refreshBtn.disabled = true;
+  els.refreshBtn.classList.add('is-spinning');
+  try {
+    await detectAndExtract({ forceRawMode: true });
+  } finally {
+    refreshing = false;
+    els.refreshBtn.disabled = false;
+    els.refreshBtn.classList.remove('is-spinning');
+  }
+}
+
+async function detectAndExtract({ forceRawMode = false } = {}) {
+  const gen = ++generation;
 
   const tab = await getActiveTab();
+  if (gen !== generation) return;
   cachedTab = tab;
   if (!tab?.url) {
+    resetUI();
     setStatus('No active tab', 'error');
     return;
   }
@@ -125,32 +161,32 @@ async function init() {
 
   if (!site) {
     // Unsupported host → RawMode.
-    await initRawMode(tab);
-    els.formats.addEventListener('click', onFormatClick);
-    els.analyzeBtn?.addEventListener('click', onAnalyzeClick);
+    await initRawMode(tab, gen, { force: forceRawMode });
     return;
   }
 
   cachedSite = site;
-  setStatus(`Detected: ${prettySource(site.source)}`, 'detect');
 
   if (site.pageReady && !site.pageReady(tab.url)) {
     // Wrong-page branch: force-hide formats + options so they can't bleed
     // through under the hint, and show the hint with action. pageHint can be
     // a function that adapts copy based on whether we have an actionable URL.
-    hideExportUI();
+    resetUI();
+    setStatus(`Detected: ${prettySource(site.source)}`, 'detect');
     const actionUrl = site.pageHintAction?.(tab.url);
     const hint = typeof site.pageHint === 'function' ? site.pageHint(actionUrl) : site.pageHint;
     showHint(hint, actionUrl, site);
-    els.formats.addEventListener('click', onFormatClick);
     return;
   }
 
-  await runExtractionFlow(tab, site);
-  els.formats.addEventListener('click', onFormatClick);
+  // Leave the previous result on screen while re-extracting (a long thread
+  // takes 20–60 s); only the status line says a pass is running.
+  if (cachedData) setStatus('Refreshing…');
+  else setStatus(`Detected: ${prettySource(site.source)}`, 'detect');
+  await runExtractionFlow(tab, site, gen);
 }
 
-async function runExtractionFlow(tab, site) {
+async function runExtractionFlow(tab, site, gen) {
   try {
     // For profile pages (LinkedIn) the experience list hydrates AFTER the
     // page-load event, so a one-shot extraction can land on an empty DOM.
@@ -158,16 +194,23 @@ async function runExtractionFlow(tab, site) {
     const data = site.kind === 'profile'
       ? await extractWithRetry(tab.id, site, { maxAttempts: 12, intervalMs: 500 })
       : await requestExtraction(tab.id, site);
+    if (gen !== generation) return;
     if (!isUseful(data, site.kind)) {
+      resetUI();
       setStatus('Nothing to export on this page', 'error');
       return;
     }
     cachedData = data;
+    els.hint.hidden = true;
+    els.hintAction.hidden = true;
+    setStatus(`Detected: ${prettySource(site.source)}`, 'detect');
     populateMeta(data, site);
     configureUI(site);
     revealFormatButtons();
     els.defaultFmt?.focus();
   } catch (err) {
+    if (gen !== generation) return;
+    resetUI();
     setStatus('Could not read this page', 'error');
     console.error(err);
   }
@@ -175,54 +218,71 @@ async function runExtractionFlow(tab, site) {
 
 // ---------- RawMode ----------
 
-async function initRawMode(tab) {
-  setStatus('Unknown site. Using RawMode...', 'raw');
+async function initRawMode(tab, gen, { force = false } = {}) {
   cachedSite = RAWMODE_SITE;
 
-  // Try to restore a cached analysis for this exact tab+url so re-opening the
-  // popup on the same page skips the Analyze step.
-  const cached = await sessionGet(rawmodeKey(tab));
+  // Reopening the popup on a page that was already analyzed (same tab + URL)
+  // re-analyzes automatically — the page may have changed since (a chat on a
+  // host we don't special-case keeps growing on the same URL). The cached
+  // snapshot is shown meanwhile so the popup is usable immediately.
+  const cached = force ? null : await sessionGet(rawmodeKey(tab));
+  if (gen !== generation) return;
   if (cached && isUseful(cached, 'article')) {
     cachedData = cached;
     populateMeta(cached, RAWMODE_SITE);
     configureUI(RAWMODE_SITE);
     revealFormatButtons();
+  }
+
+  if (cached || force) {
+    await analyzeRawMode(gen);
     return;
   }
 
-  // No cache → show the single Analyze Page button spanning both grid columns.
+  // Never analyzed → show the single Analyze Page button spanning both grid columns.
+  resetUI();
+  setStatus('Unknown site. Using RawMode...', 'raw');
   els.formats.hidden = false;
   els.analyzeBtn.hidden = false;
+  els.analyzeBtn.disabled = false;
 }
 
-async function onAnalyzeClick() {
+function onAnalyzeClick() {
   if (!cachedTab?.id) return;
-
   els.analyzeBtn.disabled = true;
-  setStatus('Analyzing…');
+  analyzeRawMode(++generation);
+}
+
+async function analyzeRawMode(gen) {
+  const tab = cachedTab;
+  const hadData = !!cachedData;
+  setStatus(hadData ? 'Refreshing…' : 'Analyzing…');
 
   try {
-    const data = await injectAndExtract(cachedTab.id, RAWMODE_SITE.script);
+    const data = await injectAndExtract(tab.id, RAWMODE_SITE.script);
+    if (gen !== generation) return;
     if (!isUseful(data, 'article')) {
-      setStatus('Nothing to extract on this page', 'error');
+      if (!hadData) { resetUI(); els.formats.hidden = false; els.analyzeBtn.hidden = false; }
       els.analyzeBtn.disabled = false;
+      setStatus('Nothing to extract on this page', 'error');
       return;
     }
     cachedData = data;
-    await sessionSet(rawmodeKey(cachedTab), data);
+    await sessionSet(rawmodeKey(tab), data);
     populateMeta(data, RAWMODE_SITE);
     configureUI(RAWMODE_SITE);
-    els.analyzeBtn.hidden = true;
     revealFormatButtons();
     setStatus(`Detected: ${data.hostname || 'page'} · RawMode`, 'detect');
     els.defaultFmt?.focus();
   } catch (err) {
+    if (gen !== generation) return;
     const msg = String(err?.message || err);
     if (/cannot access|chrome:|chrome-extension:|edge:/i.test(msg)) {
       setStatus("Can't analyze this page", 'error');
     } else {
       setStatus('Analysis failed', 'error');
     }
+    if (!hadData) { resetUI(); els.formats.hidden = false; els.analyzeBtn.hidden = false; }
     els.analyzeBtn.disabled = false;
     console.error(err);
   }
@@ -307,6 +367,17 @@ function hideExportUI() {
   if (els.fmtTxt)     els.fmtTxt.hidden = true;
   if (els.fmtJson)    els.fmtJson.hidden = true;
   if (els.fmtCsv)     els.fmtCsv.hidden = true;
+}
+
+// Back to the bare header — used before a refresh lands on a different state
+// (error, hint, Analyze) so nothing from the previous pass lingers.
+function resetUI() {
+  cachedData = null;
+  hideExportUI();
+  els.metaTitle.hidden = true;
+  els.metaSub.hidden = true;
+  if (els.hint)       els.hint.hidden = true;
+  if (els.hintAction) els.hintAction.hidden = true;
 }
 
 // ---------- Export-mode toggle (download vs clipboard) ----------
@@ -403,7 +474,9 @@ async function onFormatClick(e) {
 
   const format = btn.dataset.format;
 
-  if (cachedSite.refreshOnExport !== false) {
+  // Skip the pre-export re-extract while a refresh pass is already scrolling
+  // the page — two passes would fight over the scroll position.
+  if (cachedSite.refreshOnExport !== false && !refreshing) {
     try {
       const fresh = await requestExtraction(cachedTab.id, cachedSite);
       if (isUseful(fresh, cachedSite.kind)) cachedData = fresh;

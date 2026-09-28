@@ -59,16 +59,52 @@ html, body {
   color: var(--primary);
 }
 
+.header__right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 70%;
+}
+
 .status {
   font-size: 11px;
   font-weight: 500;
   color: var(--muted);
-  max-width: 60%;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: right;
 }
+
+/* Refresh: re-runs detect → extract so a chat that kept going after the popup
+   first read it (or an SPA hop to another thread) is picked up. Spins while a
+   pass is running. */
+.refresh {
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.refresh:hover:not(:disabled) {
+  color: var(--primary);
+  background: var(--surface);
+  border-color: var(--border);
+}
+.refresh:disabled { cursor: progress; }
+.refresh.is-spinning svg { animation: refresh-spin 0.9s linear infinite; }
+@keyframes refresh-spin { to { transform: rotate(360deg); } }
 
 .status--error  { color: var(--error); }
 .status--ok     { color: var(--success); font-weight: 600; }

@@ -10,6 +10,12 @@
 // current document and never touch the live tree.
 
 (async () => {
+  // The popup re-injects this file on every analyze/refresh. Register the
+  // message listener once per page, or each re-injection would add another
+  // listener and run a duplicate extraction per request.
+  if (window.__domDaddyRawMode) return;
+  window.__domDaddyRawMode = true;
+
   const { htmlToMarkdown } = await import(chrome.runtime.getURL('src/lib/markdown.js'));
   const { makeArticle } = await import(chrome.runtime.getURL('src/lib/schema.js'));
 
