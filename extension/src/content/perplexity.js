@@ -1,19 +1,30 @@
 // Perplexity message extractor.
 //
-// As of Sep 2026 a thread renders as one flat list whose children come in
-// (query, steps, answer) triplets:
+// As of late Sep 2026 a thread renders as one flat list with one wrapper
+// slot per item — user query or answer:
 //
-//   <div class="flex flex-col … gap-4">                     ← thread list
-//     <div><div class="contents"><div class="group/user-bubble">…</div></div></div>   ← user query
-//     <div class="contents">Finished 3 steps</div>          ← research steps (skipped)
-//     <div data-workflow-final-text class="group/final-text"><div class="prose">…</div></div>  ← answer
+//   <div class="flex flex-col gap-10 …">                           ← thread list
+//     <div class="w-full"> …(unmounted: empty, fixed height)… </div>
+//     <div class="w-full"><div class="w-full flex flex-col">
+//       <div data-workflow-final-text class="group/final-text"> … <div class="prose">…</div>   ← answer
+//     </div></div>
+//     <div class="w-full"><div class="w-full flex flex-col">
+//       <div class="group/partition" data-workflow-entry> <div data-workflow-items> <div>
+//         <div class="contents"><div class="group/user-bubble">…</div></div>              ← user query
 //     …
 //   </div>
 //
-// The list is virtualized: turns away from the viewport are still present as
-// children but EMPTY (fixed 48/20/56 px placeholders). So we walk the list,
-// scroll each empty slot into view, wait for it to mount, and harvest — the
-// same approach as the ChatGPT extractor.
+// Earlier layouts put the answer wrapper directly in the list (with query /
+// steps / answer as sibling slots), which is why the list is located as the
+// lowest common ancestor of every mounted query and answer rather than by a
+// fixed number of parent hops. Hops broke once already: the answer's parent
+// became a single-child wrapper and the extractor walked that instead,
+// exporting one message.
+//
+// The list is virtualized: items away from the viewport are still present as
+// slots but EMPTY. So we walk the list, scroll each empty slot into view,
+// wait for it to mount, and harvest — the same approach as the ChatGPT
+// extractor.
 //
 // Other quirks handled here:
 //   - User bubbles carry a trailing timestamp ("1:43 PM") and Edit/Copy
@@ -52,13 +63,26 @@
   }
 
   function findThreadList() {
-    // Answer wrappers are direct children of the list.
-    const answer = document.querySelector(SELECTORS.answerWrap);
-    if (answer) return answer.parentElement;
-    // No answer yet (brand-new thread): bubble sits at list > div > div.contents > bubble.
-    const bubble = document.querySelector(SELECTORS.userBubble);
-    if (bubble) return bubble.parentElement?.parentElement?.parentElement || null;
-    return null;
+    const anchors = [
+      ...document.querySelectorAll(SELECTORS.userBubble),
+      ...document.querySelectorAll(SELECTORS.answerWrap),
+    ];
+    if (!anchors.length) return null;
+    if (anchors.length > 1) {
+      // Every query and answer lives in its own slot of the list, so the
+      // lowest common ancestor of all of them is the list itself.
+      let lca = anchors[0].parentElement;
+      while (lca && !anchors.every(a => lca.contains(a))) lca = lca.parentElement;
+      if (lca) return lca;
+    }
+    // A single mounted item (brand-new thread): climb out of the single-child
+    // wrappers around it; the first ancestor with siblings is the slot, and
+    // its parent is the list.
+    let slot = anchors[0];
+    while (slot.parentElement && slot.parentElement.children.length === 1 && slot.parentElement !== document.body) {
+      slot = slot.parentElement;
+    }
+    return slot.parentElement;
   }
 
   function findScrollRoot(fromEl) {
@@ -88,12 +112,13 @@
       return makeConversation({ source: 'perplexity', title: getTitle(), url: location.href, sessionId: getSessionId(), messages: [] });
     }
 
+    const currentList = () => (list.isConnected ? list : findThreadList() || list);
     const scrollRoot = findScrollRoot(list);
     const savedScroll = scrollRoot.scrollTop;
     const bySlot = new Map();   // slot index -> message
 
     function harvestAll() {
-      const cur = findThreadList() || list;
+      const cur = currentList();
       Array.from(cur.children).forEach((slot, i) => {
         if (bySlot.has(i)) return;
         const kind = slotKind(slot);
@@ -108,12 +133,12 @@
     }
 
     async function scrollSlotAndWait(i, block) {
-      const slot = (findThreadList() || list).children[i];
+      const slot = currentList().children[i];
       if (!slot) return false;
       slot.scrollIntoView({ block, behavior: 'auto' });
       scrollRoot.scrollTop += 1;
       const mounted = await waitFor(() => {
-        const cur = (findThreadList() || list).children[i];
+        const cur = currentList().children[i];
         const k = slotKind(cur);
         return k === 'user' || k === 'assistant' || k === 'steps';
       });
@@ -124,7 +149,7 @@
     harvestAll();
 
     const slotCount = list.children.length;
-    const pending = i => !bySlot.has(i) && slotKind((findThreadList() || list).children[i]) === 'empty';
+    const pending = i => !bySlot.has(i) && slotKind(currentList().children[i]) === 'empty';
 
     for (let i = 0; i < slotCount; i++) {
       if (pending(i)) await scrollSlotAndWait(i, 'start');
@@ -224,6 +249,9 @@
       'button',
       '[role="button"]',
       'svg',
+      // Tables carry an aria-hidden clone of their header row for the sticky
+      // header; exporting it duplicates the header in Markdown.
+      '[aria-hidden="true"]',
     ];
     junkSelectors.forEach(sel => {
       root.querySelectorAll(sel).forEach(el => el.remove());

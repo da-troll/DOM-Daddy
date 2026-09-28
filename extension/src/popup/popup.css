@@ -138,8 +138,8 @@ main { padding: 16px; }
    download a file vs copy the built output to the clipboard. A compact,
    pill-shaped, recessed track; the active segment is a translucent mauve
    "glass" thumb (tinted, blurred backdrop, soft mauve edge) so it clearly
-   reads as selected while staying visually lighter than the solid mauve
-   primary format button below it. */
+   reads as selected. The format buttons below are deliberately all equal —
+   none is highlighted, since there is no "current" format to indicate. */
 .mode {
   display: flex;
   gap: 2px;
@@ -218,28 +218,6 @@ main { padding: 16px; }
   background: var(--primary);
   border-color: var(--primary);
   filter: brightness(1.05);
-}
-
-/* Primary (default) format button: the same translucent mauve glass as the
-   active toggle segment, scaled up — tinted gradient, blurred backdrop, soft
-   mauve edge, inner highlight. */
-.fmt--primary {
-  color: #f5e0ff;
-  font-weight: 600;
-  background: linear-gradient(180deg, rgba(203, 166, 247, 0.42), rgba(203, 166, 247, 0.24));
-  border-color: rgba(203, 166, 247, 0.6);
-  -webkit-backdrop-filter: blur(6px) saturate(160%);
-  backdrop-filter: blur(6px) saturate(160%);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.18),
-    0 1px 3px rgba(0, 0, 0, 0.35),
-    0 0 0 1px rgba(203, 166, 247, 0.12);
-  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.25);
-}
-
-.fmt--primary:hover {
-  background: linear-gradient(180deg, rgba(203, 166, 247, 0.52), rgba(203, 166, 247, 0.32));
-  border-color: rgba(203, 166, 247, 0.75);
 }
 
 .fmt:disabled { opacity: 0.5; cursor: not-allowed; }
