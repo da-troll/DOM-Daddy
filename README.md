@@ -62,7 +62,7 @@ On any site not in the registry the popup shows `Unknown site. Using RawMode...`
 2. **Semantic walker** — first `<main>` / `<article>` / `[role="main"]` element, with nav/aside/header/footer/script stripped, run through `htmlToMarkdown`. Used when Defuddle returns no useful content.
 3. **Plain text** — `document.body.textContent` as a last-ditch fallback. Always succeeds on a non-empty page.
 
-The chosen tier is recorded in the export's `extractorTier` field so you can spot when a page fell back. The four format buttons (Markdown / Text / JSON / CSV) replace the Analyze button once analysis completes, and the result is cached in `chrome.storage.session` keyed by tab + URL — re-opening the popup on the same page skips Analyze entirely. Navigating away or restarting the browser clears it.
+The chosen tier is recorded in the export's `extractorTier` field so you can spot when a page fell back. The four format buttons (Markdown / Text / JSON / CSV) replace the Analyze button once analysis completes, and the result is cached in `chrome.storage.session` keyed by tab + URL. Re-opening the popup on an already-analyzed page skips the Analyze step: the cached result is shown immediately and the page is re-analyzed in the background, so content that changed since (e.g. a chat that kept going) is picked up. Navigating away or restarting the browser clears the cache.
 
 ## Install (unpacked)
 
@@ -70,7 +70,7 @@ The chosen tier is recorded in the export's `extractorTier` field so you can spo
 2. Toggle **Developer mode** on (top-right).
 3. Click **Load unpacked** and select the `extension/` directory in this repo.
 4. Pin the extension to the toolbar.
-5. Open a supported page, click the icon, choose a format. The Download / Copy toggle above the format buttons decides whether the result is saved as a file or copied to the clipboard; the choice is remembered.
+5. Open a supported page, click the icon, choose a format. The Download / Copy toggle above the format buttons decides whether the result is saved as a file or copied to the clipboard; the choice is remembered. The circular refresh button next to the status re-reads the page without closing the popup — use it when the conversation has moved on since the popup opened.
 
 For LinkedIn specifically: open your (or another user's) profile, click **Show all experience**, and run DOM Daddy on the resulting `…/details/experience/` page. The popup will offer a "Take me there" shortcut if you click it on the wrong sub-page.
 
@@ -85,7 +85,9 @@ Popup opened
   -> popup.js sends { type: 'EXTRACT' } to the active tab
   -> matching content script returns { kind, ...data }
   -> popup branches on kind, runs the right exporter
-  -> chrome.downloads delivers the file
+  -> chrome.downloads saves the file, or the clipboard receives the text (Download / Copy toggle)
+
+Refresh button -> re-runs the whole pass against the page as it is now
 ```
 
 The shared schema (`extension/src/lib/schema.js`) is the contract between extractors and exporters. Three shapes today: `Conversation` (`kind: 'conversation'`), `Profile` (`kind: 'profile'`) and `Article` (`kind: 'article'`, RawMode).
@@ -102,7 +104,7 @@ MV3 doesn't allow content scripts to be declared as ES modules. To still share `
   - Gemini: `user-query`, `model-response` (Angular component tags). Gemini lazy-loads older turns when scrolled to the top, so the extractor scrolls up repeatedly until the turn count stops growing.
   - Google AI Mode: `[data-scope-id="turn"]` per turn; the query is the turn's `<h2>` ("You said: …"), the answer is `[data-subtree="aimc"] [data-container-id="main-col"]`. Headings are `div[role=heading][aria-level]` and are rewritten to `<hN>`; the disclaimer/share footer block is dropped. Only `google.com/search` URLs with `udm=50` or an `mtid` count as AI Mode — every other Google page falls through to RawMode.
   - AI Studio: `ms-chat-turn` → `.user-prompt-container` / `.model-prompt-container` → `.turn-content`; reasoning in `<ms-thought-chunk>`. Uses CDK virtual scrolling, so the extractor scrolls the chat top→bottom and harvests each turn as it mounts.
-  - Perplexity: `[class~="group/user-bubble"]` for user queries, `[data-workflow-final-text] .prose` for answers. The thread is virtualized (off-screen turns are empty placeholders), so the extractor scrolls each slot into view and harvests as it mounts; citation pills are rewritten to links.
+  - Perplexity: `[class~="group/user-bubble"]` for user queries, `[data-workflow-final-text] .prose` for answers. The thread list is found as the smallest container holding every query and answer (not by fixed parent hops, which broke when Perplexity added wrapper divs). It is virtualized (off-screen turns are empty placeholders), so the extractor scrolls each slot into view and harvests as it mounts; citation pills are rewritten to links and the hidden sticky-header copy of each table is dropped.
   - LinkedIn: `[componentkey^="entity-collection-item-"]` per company entry; we parse `innerText` line-by-line and ignore hashed CSS classes entirely.
 - **Extraction scrolls the page.** Every chat host virtualizes or lazy-loads its transcript, so the extractors scroll through the conversation themselves, wait for turns to mount, and restore your scroll position afterwards. A long thread can take 20–60 s; keep the tab in the foreground while it runs — a background tab renders no frames, so nothing mounts. If an export still comes up short, the browser console will show a `[DOM Daddy]` warning saying how many turns never mounted.
 - **Collapsed UIs lose data.** "Show thinking" details and LinkedIn's `…see more` may collapse content. Expand before extracting. Claude's collapsed thinking is not in the DOM at all; only the "Thought for Ns" label is.
