@@ -1,24 +1,30 @@
 // ChatGPT message extractor.
 //
-// ChatGPT virtualizes the thread, and (as of Sep 2026) the [data-turn]
-// anchors are NOT persistent any more. The thread list holds one child per
-// turn ("slot"):
+// Two layouts ship at once, chosen per account:
 //
-//   <div>                                                ← turn list
-//     <div style="--last-known-height:…; --estimated-turn-height:…"></div>  ← off-screen turn: EMPTY placeholder
-//     …
-//     <div data-turn-id-container="…" data-is-intersecting="true">          ← mounted turn
-//       <section data-turn="user|assistant" data-testid="conversation-turn-N">
-//         <div data-message-author-role="…" data-message-id="…">…</div>
-//       </section>
-//     </div>
+// Legacy (logged-out, and the pre-2026-09 app). The thread list holds one
+// child per turn ("slot"). Off-screen slots are EMPTY placeholders styled
+// with --last-known-height / --estimated-turn-height; only slots near the
+// viewport mount as:
+//
+//   <div data-turn-id-container="…">
+//     <section data-turn="user|assistant" data-testid="conversation-turn-N">
+//       <div data-message-author-role="…" data-message-id="…">…</div>
+//     </section>
 //   </div>
 //
-// Only the handful of turns near the viewport carry [data-turn]; everything
-// else is a sized placeholder. Snapshotting [data-turn] therefore yields only
-// the last few turns. Instead we walk the slots top→bottom, scroll each
-// placeholder into view, wait for it to mount, harvest, and move on. Slots
-// are re-fetched by index on every poll because React swaps the element.
+// [data-turn] is NOT a persistent anchor. Walk the slots top→bottom, scroll
+// each placeholder into view, wait for it to mount, and harvest. Re-fetch
+// slots by index on every poll — React swaps the element.
+//
+// New (signed-in Chat/Work shell, verified live 2026-10-14 on chatgpt.com).
+// None of the legacy attributes exist. Each exchange is [data-turn-key]; the
+// messages inside it carry [data-chatgpt-search-unit-key] (duplicated as
+// data-content-search-unit-key) shaped "fallback-turn-N:P:user|assistant".
+// User text is [data-user-message-bubble]. Assistant text is a MarkdownRoot,
+// [data-markdown-text-style="assistant-message"], rendered through DIL
+// (data-d-component / data-d-text-flow="word") rather than <p>/<strong>/.markdown.
+// Long threads still virtualize, so this path scrolls and harvests too.
 
 (async () => {
   const { htmlToMarkdown } = await import(chrome.runtime.getURL('src/lib/markdown.js'));
@@ -35,6 +41,15 @@
     turnContainer: '[data-turn-id-container]',
     scrollRoot: '[data-scroll-root]',
     fileChip: 'button',                        // filtered by FILENAME_RE below
+    // New layout (2026-10). Both unit attributes are present on the live
+    // tree and carry the same "fallback-turn-N:P:role" value; either one
+    // can be the only copy on a nested node, so match both.
+    turnKey: '[data-turn-key]',
+    unit: '[data-chatgpt-search-unit-key], [data-content-search-unit-key]',
+    userBubble: '[data-user-message-bubble]',
+    assistantBody: '[data-markdown-text-style="assistant-message"], [class*="MarkdownRoot"]',
+    generatedImage: '[data-testid="generated-image-preview"] img, [data-testid="generated-image-gallery"] img',
+    composer: '[data-chatgpt-composer]',
   };
 
   const MOUNT_POLL_MS = 30;
@@ -69,7 +84,8 @@
     let el = fromEl;
     while (el) {
       const cs = getComputedStyle(el);
-      if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 4) return el;
+      const oy = cs.overflowY;
+      if ((oy === 'auto' || oy === 'scroll' || oy === 'overlay') && el.scrollHeight > el.clientHeight + 4) return el;
       el = el.parentElement;
     }
     return document.scrollingElement || document.documentElement;
@@ -89,7 +105,374 @@
     return m ? Number(m[1]) : null;
   }
 
+  // Signed-in Chat/Work shell. Legacy markers are absent, so the old slot
+  // walk returns an empty conversation and the popup reports nothing to export.
+  function isNewChatGPTLayout() {
+    if (document.querySelector('[data-message-author-role], [data-testid^="conversation-turn-"]')) return false;
+    return !!document.querySelector(`${SELECTORS.turnKey}, ${SELECTORS.unit}`);
+  }
+
+  function insideComposer(el) {
+    const composer = el.closest(SELECTORS.composer);
+    // The attribute sits on the composer form. If a future shell puts it on a
+    // wrapper that also contains the thread, don't throw the thread away.
+    return !!composer && !composer.querySelector(SELECTORS.turnKey);
+  }
+
+  function outermostUnits(root) {
+    const all = [...root.querySelectorAll(SELECTORS.unit)];
+    return all.filter(el => !insideComposer(el) && !el.closest('nav')
+      && !all.some(other => other !== el && other.contains(el)));
+  }
+
+  function unitKey(unit) {
+    return unit.getAttribute('data-chatgpt-search-unit-key')
+      || unit.getAttribute('data-content-search-unit-key')
+      || '';
+  }
+
+  function roleFromUnit(unit) {
+    const m = unitKey(unit).match(/:(user|assistant|system|tool)$/);
+    if (m) return m[1];
+    if (unit.matches(SELECTORS.userBubble) || unit.querySelector(SELECTORS.userBubble)) return 'user';
+    const labelled = unit.querySelector('[data-conversation-role]')?.getAttribute('data-conversation-role');
+    if (labelled === 'user' || labelled === 'assistant' || labelled === 'system') return labelled;
+    if (unit.querySelector(SELECTORS.assistantBody)) return 'assistant';
+    return null;
+  }
+
+  function partIndex(unit) {
+    const m = unitKey(unit).match(/:(\d+):(user|assistant|system|tool)$/);
+    return m ? Number(m[1]) : 0;
+  }
+
+  // fallback-turn-N is the conversation index, not a viewport index (a
+  // 3-turn thread mounted as fallback-turn-0..2). Prefer the turn wrapper's
+  // own key over the unit key so a nested copy can't outrank it.
+  function turnIndexOf(unit) {
+    const turn = unit.closest(`${SELECTORS.turnKey}, [data-content-search-turn-key]`);
+    const fromTurn = turn?.getAttribute('data-content-search-turn-key')
+      || turn?.querySelector('[data-content-search-turn-key]')?.getAttribute('data-content-search-turn-key')
+      || '';
+    let m = fromTurn.match(/(\d+)\s*$/);
+    if (m) return Number(m[1]);
+    m = unitKey(unit).match(/fallback-turn-(\d+)/);
+    return m ? Number(m[1]) : null;
+  }
+
+  function messageIdOf(unit, role) {
+    const carrier = unit.matches('[data-chatgpt-search-message-ids], [data-dil-message-id], [data-chatgpt-selection-message-id]')
+      ? unit
+      : unit.querySelector('[data-dil-message-id], [data-chatgpt-selection-message-id], [data-chatgpt-search-message-ids]');
+    const raw = carrier?.getAttribute('data-dil-message-id')
+      || carrier?.getAttribute('data-chatgpt-selection-message-id')
+      || carrier?.getAttribute('data-chatgpt-search-message-ids')
+      || '';
+    const id = raw.split(/\s+/).filter(Boolean)[0];
+    if (id) return id;
+    if (role === 'user') return unit.closest(SELECTORS.turnKey)?.getAttribute('data-turn-key') || undefined;
+    return undefined;
+  }
+
+  function contentNodes(unit, role) {
+    if (role === 'user') {
+      const bubble = unit.matches(SELECTORS.userBubble) ? unit : unit.querySelector(SELECTORS.userBubble);
+      if (bubble) return [bubble];
+    }
+    const bodies = [...unit.querySelectorAll(SELECTORS.assistantBody)];
+    const outer = bodies.filter(el => !bodies.some(other => other !== el && other.contains(el)));
+    const kept = outer.filter(el => {
+      if (el.getAttribute('data-markdown-text-tone') !== 'tertiary') return true;
+      return (el.innerText || '').trim().length > 40;
+    });
+    if (kept.length) return kept;
+    const copies = [...unit.querySelectorAll('[data-markdown-copy="contents"]')];
+    const outerCopies = copies.filter(el => !copies.some(other => other !== el && other.contains(el)));
+    if (outerCopies.length) return outerCopies;
+    return [unit];
+  }
+
+  function dropStructuralWhitespace(root) {
+    const block = /^(P|UL|OL|LI|H[1-6]|PRE|DIV|BLOCKQUOTE|TABLE|SECTION)$/;
+    const word = '[data-d-text-flow="word"], [data-d-stream-word]';
+    const visit = (el) => {
+      if (el.tagName === 'PRE' || el.tagName === 'CODE') return;
+      [...el.children].forEach(visit);
+      if (el.closest('pre, code')) return;
+      [...el.childNodes].forEach(n => {
+        if (n.nodeType !== 3 || !/^\s*$/.test(n.nodeValue || '')) return;
+        const prev = n.previousElementSibling;
+        const next = n.nextElementSibling;
+        const besideWord = prev?.matches?.(word) || next?.matches?.(word);
+        const besideBlock = (prev && block.test(prev.tagName)) || (next && block.test(next.tagName));
+        if (besideWord || besideBlock) n.remove();
+      });
+    };
+    visit(root);
+  }
+
+  function replaceTag(el, tag) {
+    if (!tag || el.tagName.toLowerCase() === tag) return;
+    const next = el.ownerDocument.createElement(tag);
+    while (el.firstChild) next.appendChild(el.firstChild);
+    el.replaceWith(next);
+  }
+
+  // DIL paints each word as its own element and bold as data-d-default-strong,
+  // so a plain text walk either smashes words together or drops emphasis.
+  // Tag the clone from the live box's display (block text → <p>, list → <ul>/<li>)
+  // before htmlToMarkdown sees it. Never touch the live tree: React owns it.
+  function prepareContent(liveRoot) {
+    const clone = liveRoot.cloneNode(true);
+    const liveEls = [liveRoot, ...liveRoot.querySelectorAll('*')];
+    const cloneEls = [clone, ...clone.querySelectorAll('*')];
+    if (liveEls.length === cloneEls.length) {
+      for (let i = 0; i < liveEls.length; i++) {
+        const live = liveEls[i];
+        const copy = cloneEls[i];
+        if (live.getAttribute('role') === 'heading') {
+          const level = Math.min(6, Math.max(1, Number(live.getAttribute('aria-level')) || 1));
+          copy.setAttribute('data-dd-block', 'h' + level);
+          continue;
+        }
+        const comp = live.getAttribute('data-d-component');
+        let display = '';
+        try { display = getComputedStyle(live).display || ''; } catch { display = ''; }
+        if (comp === 'list') copy.setAttribute('data-dd-block', 'ul');
+        else if (comp === 'list-item') copy.setAttribute('data-dd-block', 'li');
+        else if ((comp === 'text' || comp === 'paragraph')
+          && display !== 'inline' && display !== 'inline-block' && display !== 'inline-flex' && display !== 'none') {
+          copy.setAttribute('data-dd-block', 'p');
+        }
+        if (live.getAttribute('data-d-text-flow') === 'word' || live.hasAttribute('data-d-stream-word')) {
+          let ws = '';
+          try { ws = getComputedStyle(live).whiteSpace || ''; } catch { ws = ''; }
+          if (ws.startsWith('pre')) copy.setAttribute('data-dd-no-space', '');
+        }
+      }
+    }
+    [...clone.querySelectorAll('[data-dd-block]')].reverse().forEach(el => replaceTag(el, el.getAttribute('data-dd-block')));
+    // Source whitespace between DIL word nodes (and between the blocks we just
+    // created) is indentation, not author spacing. Drop it and let separateWords
+    // put a single space back — otherwise "word\\n." becomes "word ." .
+    dropStructuralWhitespace(clone);
+    clone.querySelectorAll('[data-markdown-copy="exclude"]').forEach(el => el.remove());
+    clone.querySelectorAll('h1, h2, h3, h4, h5, h6').forEach(el => {
+      if (/^(you said|chatgpt said):?$/i.test((el.textContent || '').trim())) el.remove();
+    });
+    // Role labels ("ChatGPT said:") are sometimes the only text in a
+    // data-conversation-role node. A node that wraps the answer carries the
+    // same attribute — only drop the label itself.
+    clone.querySelectorAll('[data-conversation-role]').forEach(el => {
+      if (/^(you said|chatgpt said):?$/i.test((el.textContent || '').trim())) el.remove();
+    });
+    clone.querySelectorAll('[data-d-default-strong]').forEach(el => {
+      if (el.closest('strong, b')) return;
+      const strong = clone.ownerDocument.createElement('strong');
+      while (el.firstChild) strong.appendChild(el.firstChild);
+      el.appendChild(strong);
+    });
+    clone.querySelectorAll('[data-d-text-flow="word"], [data-d-stream-word]').forEach(el => {
+      if (el.hasAttribute('data-dd-no-space') || el.closest('pre, code')) return;
+      const text = el.textContent || '';
+      if (!text || /\s$/.test(text)) return;
+      if (/^[,.;:!?()[\]"'“”‘’]+$/.test(text.trim())) return;
+      const next = el.nextSibling;
+      if (next && next.nodeType === 3 && /^\s/.test(next.nodeValue || '')) return;
+      const nextText = (el.nextElementSibling?.textContent || '').trim();
+      if (nextText && /^[,.;:!?()[\]"'“”‘’]+$/.test(nextText)) return;
+      el.appendChild(clone.ownerDocument.createTextNode(' '));
+    });
+    stripJunk(clone);
+    return clone;
+  }
+
+  function cleanRoleLabel(text, role) {
+    if (role === 'user') return text.replace(/^(you said:\s*)+/i, '').trim();
+    if (role === 'assistant') return text.replace(/^(chatgpt said:\s*)+/i, '').trim();
+    return text.trim();
+  }
+
+  function messageFromUnit(unit, role) {
+    const chunks = [];
+    let html = '';
+    for (const node of contentNodes(unit, role)) {
+      const prepared = prepareContent(node);
+      let md = htmlToMarkdown(prepared).trim();
+      if (!md) md = (node.innerText || '').replace(/\s+\n/g, '\n').trim();
+      md = cleanRoleLabel(md, role);
+      if (md && !chunks.includes(md)) chunks.push(md);
+      html += prepared.innerHTML;
+    }
+    const content = chunks.join('\n\n').trim();
+    const attachments = extractAttachments(unit);
+    if (!content && !attachments.length) return null;
+    return makeMessage({
+      id: messageIdOf(unit, role),
+      role,
+      content,
+      html,
+      attachments,
+    });
+  }
+
+  // Parent of the turn slots: the tightest ancestor whose children each hold
+  // at most one mounted turn (empty siblings are the virtualizer's placeholders).
+  function findNewTurnList() {
+    const turns = [...document.querySelectorAll(SELECTORS.turnKey)];
+    if (!turns.length) return null;
+    let node = turns[0];
+    while (node.parentElement && node.parentElement !== document.body) {
+      const parent = node.parentElement;
+      const slots = [...parent.children];
+      const keyed = slots.filter(child => child.matches(SELECTORS.turnKey) || child.querySelector(SELECTORS.turnKey));
+      const oneEach = keyed.length >= turns.length && keyed.every(child => {
+        if (child.matches(SELECTORS.turnKey)) return !child.querySelector(SELECTORS.turnKey);
+        return child.querySelectorAll(SELECTORS.turnKey).length === 1;
+      });
+      if (oneEach) return parent;
+      node = parent;
+      if (parent.tagName === 'MAIN') break;
+    }
+    return turns[0].parentElement;
+  }
+
+  function slotNeedsMount(slot) {
+    if (!slot) return false;
+    if (slot.matches(SELECTORS.turnKey) || slot.querySelector(`${SELECTORS.turnKey}, ${SELECTORS.unit}`)) return false;
+    const style = slot.getAttribute('style') || '';
+    if (PLACEHOLDER_RE.test(style)) return true;
+    const height = style.match(/(?:^|;)\s*height\s*:\s*(\d+(?:\.\d+)?)px/);
+    return !!height && Number(height[1]) >= 40 && slot.children.length === 0 && !(slot.innerText || '').trim();
+  }
+
+  async function extractNewLayout() {
+    const anchor = document.querySelector(`${SELECTORS.turnKey}, ${SELECTORS.unit}`);
+    const scrollRoot = findScrollRoot(anchor || document.body);
+    const savedScroll = scrollRoot.scrollTop;
+    const savedWindowScroll = window.scrollY;
+    const byKey = new Map();
+    let seenOrder = 0;
+
+    function harvestNew() {
+      const units = [];
+      for (const unit of outermostUnits(document)) {
+        const nested = [...unit.querySelectorAll(SELECTORS.unit)];
+        if (nested.length) {
+          const leaves = nested.filter(el => !nested.some(other => other !== el && other.contains(el)));
+          leaves.forEach(el => units.push(el));
+          // The wrapper itself can be the user bubble's unit, with the
+          // assistant unit nested beside the bubble rather than around it.
+          const role = roleFromUnit(unit);
+          if (role === 'user' || role === 'assistant' || role === 'system') {
+            const ownsContent = contentNodes(unit, role).some(node => !leaves.some(leaf => leaf === node || leaf.contains(node)));
+            if (ownsContent) units.push(unit);
+          }
+        } else {
+          units.push(unit);
+        }
+      }
+      for (const unit of units) {
+        const role = roleFromUnit(unit);
+        if (role !== 'user' && role !== 'assistant' && role !== 'system') continue;
+        const turnIdx = turnIndexOf(unit);
+        const sort = (turnIdx == null ? 1_000_000 : turnIdx) * 1000 + partIndex(unit);
+        const attrId = messageIdOf(unit, role);
+        // Build the message before deciding the map key so a longer remount
+        // (virtualizer recycled the node) replaces a shorter copy of the same id.
+        const msg = messageFromUnit(unit, role);
+        if (!msg) continue;
+        const key = attrId || `${turnIdx}:${partIndex(unit)}:${role}`;
+        const prev = byKey.get(key);
+        if (!prev) byKey.set(key, { msg, sort, i: seenOrder++ });
+        else if ((msg.content || '').length > (prev.msg.content || '').length) byKey.set(key, { ...prev, msg });
+      }
+    }
+
+    function seenTurnKeys() {
+      return [...document.querySelectorAll(`${SELECTORS.turnKey}, [data-content-search-turn-key]`)]
+        .map(el => el.getAttribute('data-turn-key') || el.getAttribute('data-content-search-turn-key'))
+        .join('|');
+    }
+
+    async function jumpTo(top) {
+      const beforeTop = scrollRoot.scrollTop;
+      const before = seenTurnKeys();
+      scrollRoot.scrollTop = top;
+      if (Math.abs(scrollRoot.scrollTop - beforeTop) < 2) return false;
+      await waitFor(() => seenTurnKeys() !== before, 600);
+      harvestNew();
+      return true;
+    }
+
+    try {
+      harvestNew();
+
+      const list = findNewTurnList();
+      if (list) {
+        const count = list.children.length;
+        for (let i = 0; i < count; i++) {
+          const slot = list.children[i];
+          if (!slotNeedsMount(slot)) continue;
+          slot.scrollIntoView({ block: 'start', behavior: 'auto' });
+          await waitFor(() => {
+            const cur = list.children[i];
+            return cur && (cur.matches(SELECTORS.turnKey) || cur.querySelector(`${SELECTORS.turnKey}, ${SELECTORS.unit}`));
+          }, 1500);
+          harvestNew();
+        }
+      }
+
+      if (scrollRoot.scrollHeight > scrollRoot.clientHeight + 8) {
+        await jumpTo(0);
+        let stalls = 0;
+        let last = -1;
+        const started = performance.now();
+        while (performance.now() - started < 90000 && stalls < 3) {
+          harvestNew();
+          const atBottom = scrollRoot.scrollTop + scrollRoot.clientHeight >= scrollRoot.scrollHeight - 8;
+          if (byKey.size === last) stalls++;
+          else stalls = 0;
+          last = byKey.size;
+          if (atBottom) break;
+          const moved = await jumpTo(scrollRoot.scrollTop + Math.max(240, Math.round(scrollRoot.clientHeight * 0.7)));
+          if (!moved) break;
+        }
+      }
+    } finally {
+      scrollRoot.scrollTop = savedScroll;
+      window.scrollTo({ top: savedWindowScroll, behavior: 'auto' });
+    }
+
+    const entries = [...byKey.values()];
+    const indexes = [...new Set(entries.map(e => Math.floor(e.sort / 1000)).filter(n => n < 1_000_000))].sort((a, b) => a - b);
+    if (indexes.length) {
+      let missing = 0;
+      for (let i = indexes[0]; i <= indexes[indexes.length - 1]; i++) {
+        if (!indexes.includes(i)) missing++;
+      }
+      if (missing) {
+        console.warn(`[DOM Daddy] ChatGPT: ${missing} turn${missing === 1 ? '' : 's'} missing from the thread; export may be incomplete.`);
+      }
+    } else if (!entries.length) {
+      console.warn('[DOM Daddy] ChatGPT: new layout had no extractable messages.');
+    }
+
+    const messages = entries
+      .sort((a, b) => (a.sort - b.sort) || (a.i - b.i))
+      .map(e => e.msg);
+
+    return makeConversation({
+      source: 'chatgpt',
+      title: getTitle(),
+      url: location.href,
+      sessionId: getSessionId(),
+      messages,
+    });
+  }
+
   async function extractChatGPT() {
+    if (isNewChatGPTLayout()) return extractNewLayout();
     const list = findTurnList();
 
     // Fallback: no recognisable thread list — use whatever message nodes are
@@ -279,12 +662,16 @@
       const name = (el.getAttribute('aria-label') || el.textContent || '').trim();
       if (FILENAME_RE.test(name) && !out.some(a => a.name === name)) out.push({ name, type: 'file' });
     });
-    node.querySelectorAll('img').forEach(img => {
+    const pushImage = (img, name) => {
       const src = img.getAttribute('src');
       if (!src || src.startsWith('data:')) return;
-      if (img.closest('[data-message-author-role="user"]')) {
-        out.push({ name: img.getAttribute('alt') || 'image', type: 'image', url: src });
-      }
+      if (!out.some(a => a.url === src)) out.push({ name, type: 'image', url: src });
+    };
+    node.querySelectorAll('img').forEach(img => {
+      if (img.closest('[data-message-author-role="user"]')) pushImage(img, img.getAttribute('alt') || 'image');
+    });
+    node.querySelectorAll(SELECTORS.generatedImage).forEach(img => {
+      pushImage(img, img.getAttribute('alt') || 'generated image');
     });
     return out;
   }
@@ -299,6 +686,12 @@
     const PROSE = 'p, li, td, th, h1, h2, h3, h4, h5, h6, blockquote';
     root.querySelectorAll('button, [role="button"]').forEach(el => {
       if (!root.contains(el)) return;   // already removed with an ancestor
+      // The new layout wraps the whole prompt in <button data-user-message-bubble>.
+      // Deleting that button deletes the only copy of the prompt.
+      if (el.matches('[data-user-message-bubble]')) {
+        el.replaceWith(...el.childNodes);
+        return;
+      }
       const inProse = el.closest(PROSE) && root.contains(el.closest(PROSE));
       const isCodeCopy = !!el.closest('pre');
       if (!inProse || isCodeCopy) { el.remove(); return; }
