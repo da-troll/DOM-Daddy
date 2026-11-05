@@ -6,4 +6,7 @@ chrome.runtime.onInstalled.addListener(({ reason }) => {
   if (reason === 'install') {
     console.log('[chat-exporter] installed');
   }
+  chrome.storage.session?.remove?.(['bulkJob', 'bulkListed']).catch(() => {});
 });
+chrome.storage.session?.remove?.(['bulkJob', 'bulkListed']).catch(() => {});
+

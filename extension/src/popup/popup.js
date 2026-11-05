@@ -130,7 +130,7 @@ async function onRefreshClick() {
   els.refreshBtn.disabled = true;
   els.refreshBtn.classList.add('is-spinning');
   try {
-    await detectAndExtract({ forceRawMode: true });
+    await detectAndExtract({ forceRawMode: true, forceExtract: true });
   } finally {
     refreshing = false;
     els.refreshBtn.disabled = false;
@@ -138,7 +138,7 @@ async function onRefreshClick() {
   }
 }
 
-async function detectAndExtract({ forceRawMode = false } = {}) {
+async function detectAndExtract({ forceRawMode = false, forceExtract = false } = {}) {
   const gen = ++generation;
 
   const tab = await getActiveTab();
@@ -179,11 +179,40 @@ async function detectAndExtract({ forceRawMode = false } = {}) {
     return;
   }
 
+  // Conversation hosts scroll the page during extraction. Defer the scroll pass
+  // until the user actually clicks one of the four format buttons (or explicitly
+  // hits Refresh) so opening the popup never auto-scrolls the page or causes a
+  // double-scroll on export.
+  if (site.kind === 'conversation' && !forceExtract) {
+    cachedData = null;
+    els.hint.hidden = true;
+    els.hintAction.hidden = true;
+    setStatus(`Detected: ${prettySource(site.source)}`, 'detect');
+    populatePendingMeta(tab, site);
+    configureUI(site);
+    revealFormatButtons();
+    els.defaultFmt?.focus();
+    return;
+  }
+
   // Leave the previous result on screen while re-extracting (a long thread
   // takes 20–60 s); only the status line says a pass is running.
   if (cachedData) setStatus('Refreshing…');
-  else setStatus(`Detected: ${prettySource(site.source)}`, 'detect');
+  else setStatus('Extracting…');
   await runExtractionFlow(tab, site, gen);
+}
+
+function populatePendingMeta(tab, site) {
+  const rawTitle = (tab?.title || '')
+    .replace(/^ChatGPT\s*[-–—|]\s*/i, '')
+    .replace(/\s*[-–—|]\s*(?:ChatGPT|Claude|Google\s+Gemini|Gemini|Google\s+AI\s+Studio|Perplexity)\s*$/i, '')
+    .trim();
+  const title = rawTitle || `${prettySource(site.source)} conversation`;
+  els.metaTitle.textContent = title;
+  els.metaTitle.title = title;
+  els.metaSub.textContent = `Select a format to extract · ${prettySource(site.source)}`;
+  els.metaTitle.hidden = false;
+  els.metaSub.hidden = false;
 }
 
 async function runExtractionFlow(tab, site, gen) {
@@ -467,25 +496,47 @@ async function extractWithRetry(tabId, site, { maxAttempts = 12, intervalMs = 50
 
 // ---------- Format-click + downloads ----------
 
+function setFormatButtonsDisabled(disabled) {
+  for (const el of [els.defaultFmt, els.fmtTxt, els.fmtJson, els.fmtCsv]) {
+    if (el) el.disabled = disabled;
+  }
+}
+
 async function onFormatClick(e) {
   const btn = e.target.closest('button.fmt');
-  if (!btn || !cachedData || !cachedSite) return;
+  if (!btn || !cachedSite || !cachedTab?.id) return;
   if (btn.id === 'analyze-btn') return; // analyze has its own handler
 
   const format = btn.dataset.format;
 
-  // Skip the pre-export re-extract while a refresh pass is already scrolling
-  // the page — two passes would fight over the scroll position.
-  if (cachedSite.refreshOnExport !== false && !refreshing) {
+  // Run extraction once when the user picks a format (if we haven't extracted
+  // yet for this popup session). Subsequent format clicks reuse `cachedData`
+  // without scrolling again unless the user explicitly hits Refresh.
+  if (!cachedData && !refreshing) {
+    setFormatButtonsDisabled(true);
+    setStatus('Extracting…');
     try {
       const fresh = await requestExtraction(cachedTab.id, cachedSite);
-      if (isUseful(fresh, cachedSite.kind)) cachedData = fresh;
-    } catch { /* fall through with cached version */ }
+      if (!isUseful(fresh, cachedSite.kind)) {
+        resetUI();
+        setStatus('Nothing to export on this page', 'error');
+        return;
+      }
+      cachedData = fresh;
+      populateMeta(fresh, cachedSite);
+    } catch (err) {
+      setStatus('Could not read this page', 'error');
+      console.error(err);
+      return;
+    } finally {
+      setFormatButtonsDisabled(false);
+    }
   }
 
-  // Content is fully built at this point (including any refreshOnExport
-  // re-extract above and per-site scans done during extraction). Only the
-  // final delivery differs between the two modes.
+  if (!cachedData) return;
+
+  // Content is fully built at this point. Only the final delivery differs
+  // between the two modes.
   const result = runExport(cachedData, cachedSite.kind, format);
   if (!result) return;
 

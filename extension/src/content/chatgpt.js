@@ -80,15 +80,33 @@
 
   function findScrollRoot(fromEl) {
     const explicit = document.querySelector(SELECTORS.scrollRoot);
-    if (explicit) return explicit;
+    if (explicit && explicit.scrollHeight > explicit.clientHeight + 4) return explicit;
     let el = fromEl;
-    while (el) {
+    while (el && el !== document.body && el !== document.documentElement) {
       const cs = getComputedStyle(el);
       const oy = cs.overflowY;
       if ((oy === 'auto' || oy === 'scroll' || oy === 'overlay') && el.scrollHeight > el.clientHeight + 4) return el;
       el = el.parentElement;
     }
     return document.scrollingElement || document.documentElement;
+  }
+
+  // Signed-in ChatGPT transcripts can scroll a `flex-direction: column-reverse`
+  // container where `scrollTop === 0` is the *bottom* (newest message) and
+  // older history sits at negative `scrollTop` offsets (`-travel .. 0`).
+  function getScrollBounds(scroller) {
+    const travel = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    let reversed = scroller.scrollTop < 0;
+    if (!reversed) {
+      try {
+        reversed = getComputedStyle(scroller).flexDirection === 'column-reverse';
+      } catch {
+        reversed = false;
+      }
+    }
+    return reversed
+      ? { top: -travel, bottom: 0, travel, reversed: true }
+      : { top: 0, bottom: travel, travel, reversed: false };
   }
 
   // A slot is "live" if it's a mounted turn or a sized placeholder. Anything
@@ -348,11 +366,18 @@
 
   async function extractNewLayout() {
     const anchor = document.querySelector(`${SELECTORS.turnKey}, ${SELECTORS.unit}`);
-    const scrollRoot = findScrollRoot(anchor || document.body);
+    let scrollRoot = findScrollRoot(anchor || document.body);
     const savedScroll = scrollRoot.scrollTop;
     const savedWindowScroll = window.scrollY;
     const byKey = new Map();
     let seenOrder = 0;
+
+    function reattachScrollRoot() {
+      if (scrollRoot && scrollRoot.isConnected !== false) return scrollRoot;
+      const curAnchor = document.querySelector(`${SELECTORS.turnKey}, ${SELECTORS.unit}`);
+      scrollRoot = findScrollRoot(curAnchor || document.body);
+      return scrollRoot;
+    }
 
     function harvestNew() {
       const units = [];
@@ -395,14 +420,21 @@
         .join('|');
     }
 
-    async function jumpTo(top) {
-      const beforeTop = scrollRoot.scrollTop;
-      const before = seenTurnKeys();
-      scrollRoot.scrollTop = top;
-      if (Math.abs(scrollRoot.scrollTop - beforeTop) < 2) return false;
-      await waitFor(() => seenTurnKeys() !== before, 600);
-      harvestNew();
-      return true;
+    // Hold the view at the top of what is loaded and wait for ChatGPT to
+    // lazy-load older history batches (which arrive 1–6s apart on long threads).
+    async function awaitOlderHistory(scroller, deadline) {
+      const startHeight = scroller.scrollHeight;
+      const startKeys = seenTurnKeys();
+      const waitUntil = Math.min(deadline, performance.now() + 4000);
+      while (performance.now() < waitUntil) {
+        scroller.scrollTop = getScrollBounds(scroller).top;
+        await sleep(200);
+        harvestNew();
+        if (scroller.scrollHeight !== startHeight || seenTurnKeys() !== startKeys) {
+          return true;
+        }
+      }
+      return scroller.scrollHeight !== startHeight || seenTurnKeys() !== startKeys;
     }
 
     try {
@@ -424,24 +456,117 @@
       }
 
       if (scrollRoot.scrollHeight > scrollRoot.clientHeight + 8) {
-        await jumpTo(0);
-        let stalls = 0;
-        let last = -1;
-        const started = performance.now();
-        while (performance.now() - started < 90000 && stalls < 3) {
+        const deadline = performance.now() + 90_000;
+        const initialBounds = getScrollBounds(scrollRoot);
+
+        if (initialBounds.reversed) {
+          // `flex-direction: column-reverse`: `scrollTop === 0` is the bottom
+          // (newest message) and `top` is `-travel`. Sweep upward from the
+          // newest message to the oldest so positions measured from the bottom
+          // never shift as older history batches prepend above.
+          scrollRoot.scrollTop = initialBounds.bottom;
+          await sleep(150);
           harvestNew();
-          const atBottom = scrollRoot.scrollTop + scrollRoot.clientHeight >= scrollRoot.scrollHeight - 8;
-          if (byKey.size === last) stalls++;
-          else stalls = 0;
-          last = byKey.size;
-          if (atBottom) break;
-          const moved = await jumpTo(scrollRoot.scrollTop + Math.max(240, Math.round(scrollRoot.clientHeight * 0.7)));
-          if (!moved) break;
+
+          let stalls = 0;
+          while (performance.now() < deadline && stalls < 5) {
+            scrollRoot = reattachScrollRoot();
+            const beforeTop = scrollRoot.scrollTop;
+            const beforeCount = byKey.size;
+            const beforeKeys = seenTurnKeys();
+            const step = Math.max(240, Math.round(scrollRoot.clientHeight * 0.75));
+            scrollRoot.scrollTop = beforeTop - step;
+            await waitFor(() => seenTurnKeys() !== beforeKeys, 350);
+            harvestNew();
+
+            const bounds = getScrollBounds(scrollRoot);
+            if (scrollRoot.scrollTop < beforeTop - 1 || byKey.size > beforeCount) {
+              stalls = 0;
+              continue;
+            }
+            if (scrollRoot.scrollTop <= bounds.top + 8) {
+              if (await awaitOlderHistory(scrollRoot, deadline)) {
+                stalls = 0;
+                continue;
+              }
+              break;
+            }
+            stalls++;
+          }
+        } else {
+          // Normal top-to-bottom scroller (`top === 0`, `bottom === travel`).
+          // Pin to the top first until lazy-loaded older history stops growing
+          // the scroll container, harvesting any turns that mount along the way.
+          let prevHeight = -1;
+          let prevMinIdx = Infinity;
+          let stableTop = 0;
+          while (performance.now() < deadline && stableTop < 3) {
+            scrollRoot = reattachScrollRoot();
+            const beforeKeys = seenTurnKeys();
+            scrollRoot.scrollTop = 0;
+            const firstTurn = document.querySelector(SELECTORS.turnKey);
+            if (firstTurn && scrollRoot.scrollTop > 4) {
+              firstTurn.scrollIntoView({ block: 'start', behavior: 'auto' });
+              scrollRoot.scrollTop = 0;
+            }
+            await waitFor(() => seenTurnKeys() !== beforeKeys || scrollRoot.scrollHeight !== prevHeight, 800);
+            harvestNew();
+
+            let minIdx = Infinity;
+            for (const e of byKey.values()) {
+              const idx = Math.floor(e.sort / 1000);
+              if (idx < minIdx) minIdx = idx;
+            }
+            if (minIdx === 0) break; // Reached conversation turn 0!
+
+            if (scrollRoot.scrollHeight === prevHeight && minIdx === prevMinIdx) {
+              // Wait once at the top in case a slow history batch is in flight.
+              const loadedMore = await awaitOlderHistory(scrollRoot, deadline);
+              if (!loadedMore) break;
+              stableTop = 0;
+            } else {
+              stableTop = 0;
+            }
+            prevHeight = scrollRoot.scrollHeight;
+            prevMinIdx = minIdx;
+          }
+
+          // Now sweep downward from top (0) to bottom (`scrollHeight - clientHeight`),
+          // harvesting every turn as the virtual window slides down. Never count
+          // a step as a "stall" while `scrollTop` is still advancing!
+          let stalls = 0;
+          while (performance.now() < deadline && stalls < 5) {
+            scrollRoot = reattachScrollRoot();
+            harvestNew();
+            const beforeTop = scrollRoot.scrollTop;
+            const beforeCount = byKey.size;
+            const beforeKeys = seenTurnKeys();
+            const step = Math.max(240, Math.round(scrollRoot.clientHeight * 0.75));
+            scrollRoot.scrollTop = beforeTop + step;
+            await waitFor(() => seenTurnKeys() !== beforeKeys, 350);
+            harvestNew();
+
+            const atBottom = scrollRoot.scrollTop + scrollRoot.clientHeight >= scrollRoot.scrollHeight - 8;
+            if (scrollRoot.scrollTop > beforeTop + 1 || byKey.size > beforeCount) {
+              stalls = 0;
+              if (atBottom) {
+                // Wait briefly at the bottom for the final turns to finish mounting.
+                await waitFor(() => seenTurnKeys() !== beforeKeys, 350);
+                harvestNew();
+                break;
+              }
+              continue;
+            }
+            if (atBottom) break;
+            stalls++;
+          }
         }
       }
     } finally {
-      scrollRoot.scrollTop = savedScroll;
-      window.scrollTo({ top: savedWindowScroll, behavior: 'auto' });
+      try {
+        scrollRoot.scrollTop = savedScroll;
+        window.scrollTo({ top: savedWindowScroll, behavior: 'auto' });
+      } catch { /* ignore detached scroller */ }
     }
 
     const entries = [...byKey.values()];
@@ -471,7 +596,243 @@
     });
   }
 
+  // ---------- Backend API path (primary) ----------
+  //
+  // The signed-in app loads every conversation from its own same-origin JSON
+  // endpoint. Reading it directly returns the whole thread in one request: no
+  // scrolling, no virtualization, and it works in a background tab because
+  // nothing has to mount. Any failure (no /c/{id}, logged out, temporary chat,
+  // shape change, 401/403/404) throws and extractChatGPT falls back to the DOM.
+  //
+  // The response is a tree: `mapping` holds every node (including edited and
+  // regenerated branches) and `current_node` is the leaf of the branch on
+  // screen. Walk parent links from that leaf so only the visible branch is
+  // exported.
+
+  const API_TIMEOUT_MS = 15000;
+
+  async function fetchJSON(path, headers) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), API_TIMEOUT_MS);
+    try {
+      const res = await fetch(path, { credentials: 'include', headers, signal: ctrl.signal });
+      if (!res.ok) throw new Error(`${path} → HTTP ${res.status}`);
+      return await res.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function readCookie(name) {
+    const m = document.cookie.match(new RegExp('(?:^|;\\s*)' + name + '=([^;]*)'));
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+
+  // Private-use markers wrap inline widgets in the raw text:
+  // \ue200cite\ue202turn0search1\ue201. The rendered app swaps each one for
+  // the entry in metadata.content_references whose matched_text equals it.
+  const PUA_SPAN_RE = /\ue200[^\ue201]*\ue201/g;
+  const PUA_CHAR_RE = /[\ue200-\ue2ff]/g;
+
+  function refReplacement(ref) {
+    const items = Array.isArray(ref.items) ? ref.items : [];
+    const links = items
+      .filter(it => it && it.url)
+      .map(it => `[${(it.title || it.attribution || hostOf(it.url)).replace(/[[\]]/g, '')}](${it.url})`);
+    if (links.length) return ' ' + links.join(' ');
+    if (ref.safe_urls?.length && ref.type !== 'image_v2') {
+      return ' ' + ref.safe_urls.map(u => `[${hostOf(u)}](${u})`).join(' ');
+    }
+    if (typeof ref.alt === 'string') return ref.alt;
+    return '';
+  }
+
+  function hostOf(url) {
+    try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return 'source'; }
+  }
+
+  function resolveReferences(text, metadata) {
+    if (!text) return '';
+    let out = text;
+    const refs = Array.isArray(metadata?.content_references) ? metadata.content_references : [];
+    // Longest first so a marker that contains another is replaced whole.
+    const sorted = refs
+      .filter(r => r && typeof r.matched_text === 'string' && r.matched_text)
+      .sort((a, b) => b.matched_text.length - a.matched_text.length);
+    for (const ref of sorted) {
+      out = out.split(ref.matched_text).join(refReplacement(ref));
+    }
+    return out.replace(PUA_SPAN_RE, '').replace(PUA_CHAR_RE, '');
+  }
+
+  function partsToText(parts) {
+    if (!Array.isArray(parts)) return '';
+    return parts.filter(p => typeof p === 'string').join('\n\n');
+  }
+
+  function apiAttachments(message) {
+    const out = [];
+    for (const a of message.metadata?.attachments || []) {
+      if (!a?.name) continue;
+      const type = /^image\//.test(a.mime_type || '') ? 'image' : 'file';
+      out.push({ name: a.name, type });
+    }
+    // Images pasted inline (and generated images) are parts, not attachments.
+    // An upload shows up both ways; the named attachment is the useful one.
+    const hasNamedImage = out.some(x => x.type === 'image');
+    const parts = Array.isArray(message.content?.parts) ? message.content.parts : [];
+    for (const p of parts) {
+      if (hasNamedImage) break;
+      if (p && typeof p === 'object' && p.content_type === 'image_asset_pointer') {
+        const generated = !!p.metadata?.dalle || message.author?.role === 'tool';
+        const name = generated ? 'generated image' : 'image';
+        if (!out.some(x => x.name === name && x.type === 'image')) out.push({ name, type: 'image' });
+      }
+    }
+    return out;
+  }
+
+  function thoughtsText(content) {
+    const thoughts = Array.isArray(content?.thoughts) ? content.thoughts : [];
+    return thoughts
+      .map(t => {
+        const head = t?.summary ? `**${t.summary.trim()}**` : '';
+        const body = (t?.content || '').trim();
+        return [head, body].filter(Boolean).join('\n\n');
+      })
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
+  function isoTime(sec) {
+    return typeof sec === 'number' && sec > 0 ? new Date(sec * 1000).toISOString() : undefined;
+  }
+
+  function conversationFromApi(data, sessionId) {
+    const mapping = data?.mapping;
+    if (!mapping || typeof mapping !== 'object') throw new Error('no mapping in response');
+    let nodeId = data.current_node;
+    if (!nodeId || !mapping[nodeId]) throw new Error('no current_node in response');
+
+    const chain = [];
+    const seen = new Set();
+    while (nodeId && mapping[nodeId] && !seen.has(nodeId)) {
+      seen.add(nodeId);
+      chain.push(mapping[nodeId]);
+      nodeId = mapping[nodeId].parent;
+    }
+    chain.reverse();
+
+    const messages = [];
+    let pendingReasoning = '';
+    let pendingAttachments = [];
+
+    for (const node of chain) {
+      const m = node.message;
+      if (!m) continue;
+      const role = m.author?.role;
+      const meta = m.metadata || {};
+      const ctype = m.content?.content_type;
+      if (meta.is_visually_hidden_from_conversation) continue;
+
+      // Reasoning arrives as its own assistant node before the reply.
+      if (ctype === 'thoughts') {
+        const t = thoughtsText(m.content);
+        if (t) pendingReasoning = pendingReasoning ? `${pendingReasoning}\n\n${t}` : t;
+        continue;
+      }
+      if (ctype === 'reasoning_recap') continue;   // "Thought for 39s" label
+
+      // Tool results: keep generated images/files, drop the raw output.
+      if (role === 'tool') {
+        pendingAttachments.push(...apiAttachments(m));
+        continue;
+      }
+      if (role !== 'user' && role !== 'assistant') continue;
+      // Assistant messages addressed to a tool (python, web.run, canmore …)
+      // are internal calls, not visible text.
+      if (role === 'assistant' && m.recipient && m.recipient !== 'all') continue;
+      if (ctype && ctype !== 'text' && ctype !== 'multimodal_text') continue;
+
+      const content = resolveReferences(partsToText(m.content?.parts), meta).trim();
+      const attachments = apiAttachments(m);
+      if (!content && !attachments.length) continue;
+
+      // One visible assistant turn is often several text nodes split by tool
+      // calls. The app renders them as one reply, so merge them.
+      const prev = messages[messages.length - 1];
+      if (role === 'assistant' && prev?.role === 'assistant') {
+        if (content) prev.content = prev.content ? `${prev.content}\n\n${content}` : content;
+        const extra = [...pendingAttachments, ...attachments];
+        if (extra.length) prev.attachments = [...(prev.attachments || []), ...extra];
+        if (pendingReasoning) prev.reasoning = prev.reasoning ? `${prev.reasoning}\n\n${pendingReasoning}` : pendingReasoning;
+        pendingReasoning = '';
+        pendingAttachments = [];
+        continue;
+      }
+
+      messages.push(makeMessage({
+        id: m.id,
+        role,
+        content,
+        html: '',
+        reasoning: role === 'assistant' ? (pendingReasoning || undefined) : undefined,
+        attachments: role === 'assistant' ? [...pendingAttachments, ...attachments] : attachments,
+        timestamp: isoTime(m.create_time),
+      }));
+      if (role === 'assistant') {
+        pendingReasoning = '';
+        pendingAttachments = [];
+      }
+    }
+
+    // A trailing tool result (e.g. an image generation with no follow-up text)
+    // still belongs to the last assistant turn.
+    if (pendingAttachments.length) {
+      const last = messages[messages.length - 1];
+      if (last?.role === 'assistant') last.attachments = [...(last.attachments || []), ...pendingAttachments];
+    }
+
+    if (!messages.length) throw new Error('API returned no visible messages');
+
+    return makeConversation({
+      source: 'chatgpt',
+      title: (data.title || '').trim() || getTitle(),
+      url: location.href,
+      sessionId,
+      messages,
+    });
+  }
+
+  async function extractFromApi() {
+    const sessionId = getSessionId();
+    if (!sessionId) throw new Error('no /c/{id} in URL');
+    const session = await fetchJSON('/api/auth/session');
+    const token = session?.accessToken;
+    if (!token) throw new Error('not signed in');
+    const headers = { Authorization: `Bearer ${token}` };
+    // Workspace (Team/Enterprise) accounts scope requests to an account id.
+    // Not verified live; only sent when the cookie is readable.
+    const account = readCookie('_account');
+    if (account) headers['ChatGPT-Account-Id'] = account;
+    const data = await fetchJSON(`/backend-api/conversation/${encodeURIComponent(sessionId)}`, headers);
+    return conversationFromApi(data, sessionId);
+  }
+
   async function extractChatGPT() {
+    try {
+      const conv = await extractFromApi();
+      console.info(`[DOM Daddy] ChatGPT: read ${conv.messages.length} messages from the API`);
+      return conv;
+    } catch (err) {
+      console.warn('[DOM Daddy] ChatGPT API read failed, scrolling the page instead:', err?.message || err);
+      return extractFromDom();
+    }
+  }
+
+  // ---------- DOM path (fallback) ----------
+
+  async function extractFromDom() {
     if (isNewChatGPTLayout()) return extractNewLayout();
     const list = findTurnList();
 
